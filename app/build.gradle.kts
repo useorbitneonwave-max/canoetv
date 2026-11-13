@@ -15,6 +15,13 @@ android {
         targetSdk = 34
         versionCode = buildNumber
         versionName = "1.0.$buildNumber"
+        // The GitHub repo this app updates itself from
+        val repo = System.getenv("GITHUB_REPOSITORY") ?: "useorbitneonwave-max/canoetv"
+        buildConfigField("String", "REPO", "\"$repo\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     // One fixed signing key, so every new build installs over the old one.

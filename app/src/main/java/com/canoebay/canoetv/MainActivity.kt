@@ -1,12 +1,16 @@
 package com.canoebay.canoetv
 
 import android.app.AlertDialog
+import android.app.PictureInPictureParams
+import android.content.Intent
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.Rational
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
@@ -15,6 +19,7 @@ import android.widget.ArrayAdapter
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.Spinner
@@ -24,6 +29,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -40,10 +46,14 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import coil.load
+import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(UnstableApi::class)
 class MainActivity : AppCompatActivity() {
@@ -62,6 +72,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var playerView: PlayerView
     private lateinit var loading: ProgressBar
     private lateinit var overlay: TextView
+    private lateinit var banner: LinearLayout
+    private lateinit var bannerLogo: ImageView
+    private lateinit var bannerTitle: TextView
+    private lateinit var bannerSub: TextView
     private lateinit var nowPlaying: TextView
     private lateinit var sourceSpinner: Spinner
     private lateinit var groupSpinner: Spinner
@@ -83,7 +97,9 @@ class MainActivity : AppCompatActivity() {
     private var filtered: List<Channel> = emptyList()
     private var groupKeys: List<String> = listOf(KEY_ALL)
     private var current: Channel? = null
+    private var previous: Channel? = null
     private var fullscreen = false
+    private var inPip = false
     private var skipCount = 0
     private var loadToken = 0
 
@@ -101,6 +117,10 @@ class MainActivity : AppCompatActivity() {
         playerView = findViewById(R.id.playerView)
         loading = findViewById(R.id.loading)
         overlay = findViewById(R.id.overlay)
+        banner = findViewById(R.id.banner)
+        bannerLogo = findViewById(R.id.bannerLogo)
+        bannerTitle = findViewById(R.id.bannerTitle)
+        bannerSub = findViewById(R.id.bannerSub)
         nowPlaying = findViewById(R.id.nowPlaying)
         sourceSpinner = findViewById(R.id.sourceSpinner)
         groupSpinner = findViewById(R.id.groupSpinner)
@@ -114,12 +134,7 @@ class MainActivity : AppCompatActivity() {
 
         // Bigger buffer than the default so short network hiccups don't interrupt playback
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                /* minBufferMs = */ 30_000,
-                /* maxBufferMs = */ 90_000,
-                /* bufferForPlaybackMs = */ 2_500,
-                /* bufferForPlaybackAfterRebufferMs = */ 6_000,
-            )
+            .setBufferDurationsMs(30_000, 90_000, 2_500, 6_000)
             .build()
         player = ExoPlayer.Builder(this).setLoadControl(loadControl).build()
         player.addListener(playerListener)
@@ -152,6 +167,9 @@ class MainActivity : AppCompatActivity() {
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
 
+        findViewById<View>(R.id.lastBtn).setOnClickListener { lastChannel() }
+        findViewById<View>(R.id.menuBtn).setOnClickListener { showMenu() }
+
         backCallback = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() = setFullscreen(false)
         }
@@ -159,14 +177,99 @@ class MainActivity : AppCompatActivity() {
 
         setupSources(selectId = store.sourceId)
         applyLayout()
+
+        // Look for a newer version shortly after start-up (at most twice a day)
+        handler.postDelayed({ checkForUpdates(manual = false) }, 8_000)
+    }
+
+    private fun isTv(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_TELEVISION
+
+    // ------------------------------------------------------------------ menu
+
+    private fun showMenu() {
+        val sleepLabel = if (sleepAt > 0) {
+            val mins = ((sleepAt - System.currentTimeMillis()) / 60_000).coerceAtLeast(1)
+            "⏾ Sleep timer (stops in $mins min)"
+        } else "⏾ Sleep timer"
+        val items = arrayOf(
+            "⇄ Last channel",
+            sleepLabel,
+            "↻ Retry offline channels",
+            "+ Add playlist URL",
+            "– Remove a custom playlist",
+            "⬆ Check for updates",
+            "ℹ About CanoeTV",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("CanoeTV")
+            .setItems(items) { _, i ->
+                when (i) {
+                    0 -> lastChannel()
+                    1 -> showSleepTimer()
+                    2 -> retryOffline()
+                    3 -> showAddDialog()
+                    4 -> showRemoveDialog()
+                    5 -> checkForUpdates(manual = true)
+                    6 -> showAbout()
+                }
+            }
+            .show()
+    }
+
+    private fun showAbout() {
+        AlertDialog.Builder(this)
+            .setTitle("CanoeTV ${BuildConfig.VERSION_NAME}")
+            .setMessage(
+                "Free channels from Free-TV and iptv-org.\n\n" +
+                    "Remote tips:\n• OK — play / OK again for full screen\n• Up/Down in full screen — change channel\n" +
+                    "• Number keys — jump to a channel number\n• 0 or Last — back to the previous channel\n" +
+                    "• Long-press OK — add to favourites\n• Menu — this menu"
+            )
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    private fun retryOffline() {
+        store.clearHealth()
+        skipCount = 0
+        applyFilter()
+        toast("Offline marks cleared — all channels will be tried again.")
+    }
+
+    // ------------------------------------------------------------------ sleep timer
+
+    private var sleepAt = 0L
+    private val sleepRunnable = Runnable {
+        sleepAt = 0L
+        player.pause()
+        showMessage("Sleep timer: playback stopped.\nPress play or pick a channel to keep watching.", error = false)
+    }
+
+    private fun showSleepTimer() {
+        val labels = arrayOf("Off", "15 minutes", "30 minutes", "1 hour", "1½ hours", "2 hours")
+        val minutes = intArrayOf(0, 15, 30, 60, 90, 120)
+        AlertDialog.Builder(this)
+            .setTitle("Sleep timer")
+            .setItems(labels) { _, i ->
+                handler.removeCallbacks(sleepRunnable)
+                if (minutes[i] == 0) {
+                    sleepAt = 0L
+                    toast("Sleep timer off")
+                } else {
+                    sleepAt = System.currentTimeMillis() + minutes[i] * 60_000L
+                    handler.postDelayed(sleepRunnable, minutes[i] * 60_000L)
+                    toast("Playback will stop in ${labels[i]}")
+                }
+            }
+            .show()
     }
 
     // ------------------------------------------------------------------ sources & loading
 
     private fun setupSources(selectId: String) {
         sources = Sources.builtIn() + store.customSources()
-        val labels = sources.map { if (it.custom) "📁 ${it.name}" else it.name } +
-            listOf("+ Add playlist URL…", "– Remove a custom playlist…", "↻ Retry offline channels")
+        val labels = sources.map { if (it.custom) "📁 ${it.name}" else it.name }
         sourceSpinner.adapter = ArrayAdapter(this, R.layout.spinner_item, labels).also {
             it.setDropDownViewResource(R.layout.spinner_item)
         }
@@ -174,32 +277,17 @@ class MainActivity : AppCompatActivity() {
         sourceSpinner.setSelection(idx, false)
         sourceSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                when {
-                    pos == sources.size -> { resetSourceSelection(); showAddDialog() }
-                    pos == sources.size + 1 -> { resetSourceSelection(); showRemoveDialog() }
-                    pos == sources.size + 2 -> {
-                        resetSourceSelection()
-                        store.clearHealth()
-                        skipCount = 0
-                        applyFilter()
-                        toast("Offline marks cleared — all channels will be tried again.")
-                    }
-                    sources[pos].id != loadedSourceId -> load(sources[pos])
-                }
+                if (pos in sources.indices && sources[pos].id != loadedSourceId) load(sources[pos])
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
         if (loadedSourceId != sources[idx].id) load(sources[idx])
     }
 
-    private fun resetSourceSelection() {
-        val i = sources.indexOfFirst { it.id == loadedSourceId }
-        if (i >= 0) sourceSpinner.setSelection(i, false)
-    }
-
     private fun load(src: Source) {
         val token = ++loadToken
         loadedSourceId = src.id
+        checkGen++ // stop any background check of the old list
         status.text = "Loading…"
         if (current == null) showMessage("Loading ${src.name}…", error = false)
         io.execute {
@@ -236,25 +324,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun download(url: String): String {
+    /** Opens a URL, following redirects (including http↔https), and returns the connection. */
+    private fun open(url: String, ua: String = UA, referrer: String? = null, timeoutMs: Int = 20_000): HttpURLConnection {
         var target = URL(url)
-        repeat(5) {
+        repeat(6) {
             val conn = target.openConnection() as HttpURLConnection
-            conn.connectTimeout = 20_000
-            conn.readTimeout = 30_000
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
             conn.instanceFollowRedirects = false
-            conn.setRequestProperty("User-Agent", UA)
+            conn.setRequestProperty("User-Agent", ua)
+            if (referrer != null) conn.setRequestProperty("Referer", referrer)
             val code = conn.responseCode
             if (code in 300..399) {
-                val loc = conn.getHeaderField("Location") ?: throw Exception("Bad redirect")
-                target = URL(target, loc)
+                val loc = conn.getHeaderField("Location")
                 conn.disconnect()
+                if (loc == null) throw Exception("Bad redirect")
+                target = URL(target, loc)
                 return@repeat
             }
-            if (code != 200) throw Exception("HTTP $code")
-            return conn.inputStream.bufferedReader().use { it.readText() }
+            return conn
         }
         throw Exception("Too many redirects")
+    }
+
+    private fun download(url: String): String {
+        val conn = open(url)
+        try {
+            if (conn.responseCode != 200) throw Exception("HTTP ${conn.responseCode}")
+            return conn.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun cacheFile(url: String) = File(filesDir, "playlist_" + Integer.toHexString(url.hashCode()) + ".m3u")
@@ -286,8 +386,9 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Remove which playlist?")
             .setItems(custom.map { it.name }.toTypedArray()) { _, i ->
                 store.removeCustom(custom[i].urls.first())
-                val keep = if (loadedSourceId == custom[i].id) "all" else (loadedSourceId ?: "all")
-                if (loadedSourceId == custom[i].id) loadedSourceId = null
+                val removingLoaded = loadedSourceId == custom[i].id
+                val keep = if (removingLoaded) "all" else (loadedSourceId ?: "all")
+                if (removingLoaded) loadedSourceId = null
                 setupSources(selectId = keep)
             }
             .setNegativeButton("Cancel", null)
@@ -297,7 +398,7 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ list & filtering
 
     private fun buildGroups() {
-        val previous = groupKeys.getOrNull(groupSpinner.selectedItemPosition)
+        val prev = groupKeys.getOrNull(groupSpinner.selectedItemPosition)
         val counts = channels.groupingBy { it.group }.eachCount().toSortedMap(String.CASE_INSENSITIVE_ORDER)
         val favCount = channels.count { it.url in store.favs }
         groupKeys = listOf(KEY_ALL, KEY_FAV, KEY_RECENT) + counts.keys
@@ -306,7 +407,7 @@ class MainActivity : AppCompatActivity() {
         groupSpinner.adapter = ArrayAdapter(this, R.layout.spinner_item, labels).also {
             it.setDropDownViewResource(R.layout.spinner_item)
         }
-        val i = groupKeys.indexOf(previous)
+        val i = groupKeys.indexOf(prev)
         groupSpinner.setSelection(if (i >= 0) i else 0, false)
     }
 
@@ -325,6 +426,9 @@ class MainActivity : AppCompatActivity() {
         filtered = base
         adapter.submit(filtered, current?.url)
         status.text = "${filtered.size} channels"
+        // Quietly test whatever is now on screen
+        handler.removeCallbacks(checkRunnable)
+        handler.postDelayed(checkRunnable, 2_000)
     }
 
     private fun toggleFav(ch: Channel) {
@@ -336,11 +440,76 @@ class MainActivity : AppCompatActivity() {
         if (key == KEY_FAV) applyFilter() else adapter.refresh(ch.url)
     }
 
+    // ------------------------------------------------------------------ background channel check
+
+    @Volatile private var checkGen = 0
+    private val checkPool = Executors.newFixedThreadPool(6)
+    private val checkRunnable = Runnable { startBackgroundCheck() }
+
+    /** Tests the channels in the current list that haven't been tested in the last 24h. */
+    private fun startBackgroundCheck() {
+        val gen = ++checkGen
+        val todo = filtered.filter { store.health(it.url) == null && it.url != current?.url }.take(400)
+        if (todo.isEmpty()) return
+        val total = todo.size
+        val done = AtomicInteger()
+        val working = AtomicInteger()
+        val pending = ConcurrentHashMap<String, Boolean>()
+        for (c in todo) checkPool.execute {
+            if (gen != checkGen) return@execute
+            val ok = probe(c)
+            pending[c.url] = ok
+            if (ok) working.incrementAndGet()
+            val n = done.incrementAndGet()
+            if (n % 20 == 0 || n == total) runOnUiThread {
+                val batch = HashMap(pending)
+                batch.keys.forEach { pending.remove(it) }
+                store.setHealthBatch(batch)
+                if (gen != checkGen) return@runOnUiThread
+                if (n == total) {
+                    status.text = "${working.get()} of $total checked work"
+                    if (hideDead.isChecked) {
+                        // Re-filter without starting another check straight away
+                        applyFilter()
+                        handler.removeCallbacks(checkRunnable)
+                    } else adapter.notifyDataSetChanged()
+                } else {
+                    status.text = "Checking channels… $n/$total"
+                    adapter.notifyDataSetChanged()
+                }
+            }
+        }
+    }
+
+    /** Quick test: does the stream answer with something playable? Reads at most a few KB. */
+    private fun probe(c: Channel): Boolean {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = open(c.url, c.userAgent ?: UA, c.referrer, timeoutMs = 7_000)
+            if (conn.responseCode !in 200..299) return false
+            val buf = ByteArray(2048)
+            val n = conn.inputStream.read(buf)
+            if (n <= 0) return false
+            val head = String(buf, 0, n, Charsets.UTF_8)
+            when {
+                head.contains("#EXTM3U") -> true
+                head.trimStart().startsWith("<") -> false // a web page, not video
+                else -> true
+            }
+        } catch (e: Exception) {
+            false
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
     // ------------------------------------------------------------------ playback
 
     private fun play(ch: Channel, auto: Boolean) {
         handler.removeCallbacks(skipRunnable)
         if (!auto) skipCount = 0
+        val prev = current
+        if (!auto && prev != null && prev.url != ch.url) previous = prev
         current = ch
         nowPlaying.text = ch.name
         store.lastUrl = ch.url
@@ -350,6 +519,7 @@ class MainActivity : AppCompatActivity() {
         loading.visibility = View.VISIBLE
         playedOk = false
         reconnects = 0
+        showBanner(ch)
         startSource(ch)
 
         val pos = filtered.indexOfFirst { it.url == ch.url }
@@ -377,6 +547,66 @@ class MainActivity : AppCompatActivity() {
         player.playWhenReady = true
     }
 
+    private fun lastChannel() {
+        val p = previous
+        if (p == null) { toast("No previous channel yet"); return }
+        play(p, auto = false)
+    }
+
+    private fun step(delta: Int, auto: Boolean = false) {
+        if (filtered.isEmpty()) return
+        val size = filtered.size
+        var pos = filtered.indexOfFirst { it.url == current?.url }
+        for (i in 0 until size) {
+            pos = if (pos < 0) 0 else (pos + delta + size) % size
+            // When skipping automatically, jump over channels already known to be dead
+            if (!auto || store.health(filtered[pos].url) != false) break
+        }
+        play(filtered[pos], auto)
+    }
+
+    // ------------------------------------------------------------------ channel banner & number entry
+
+    private val hideBanner = Runnable { banner.visibility = View.GONE }
+
+    private fun showBanner(ch: Channel) {
+        if (inPip) return
+        bannerLogo.visibility = View.VISIBLE
+        if (ch.logo.isNotEmpty()) {
+            bannerLogo.load(ch.logo) {
+                placeholder(R.drawable.logo_placeholder)
+                error(R.drawable.logo_placeholder)
+            }
+        } else bannerLogo.setImageResource(R.drawable.logo_placeholder)
+        bannerTitle.text = "${ch.number}   ${ch.name}"
+        bannerSub.text = ch.group
+        banner.visibility = View.VISIBLE
+        handler.removeCallbacks(hideBanner)
+        handler.postDelayed(hideBanner, 4_000)
+    }
+
+    private var typedNumber = ""
+    private val commitNumber = Runnable {
+        val n = typedNumber.toIntOrNull()
+        typedNumber = ""
+        val ch = n?.let { channels.getOrNull(it - 1) }
+        if (ch != null) play(ch, auto = false)
+        else { banner.visibility = View.GONE; toast("There's no channel $n in this list") }
+    }
+
+    private fun typeDigit(d: Int) {
+        if (typedNumber.isEmpty() && d == 0) { lastChannel(); return }
+        if (typedNumber.length >= 5) return
+        typedNumber += d
+        bannerLogo.visibility = View.GONE
+        bannerTitle.text = "Channel  ${typedNumber}_"
+        bannerSub.text = channels.getOrNull(typedNumber.toInt() - 1)?.name ?: ""
+        banner.visibility = View.VISIBLE
+        handler.removeCallbacks(hideBanner)
+        handler.removeCallbacks(commitNumber)
+        handler.postDelayed(commitNumber, 1_800)
+    }
+
     // ------------------------------------------------------------------ auto-reconnect
 
     private var playedOk = false        // current channel has played at least once
@@ -394,7 +624,6 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(skipRunnable)
         loading.visibility = View.VISIBLE
         status.text = "Reconnecting… ($why)"
-        // Short back-off: 1s, 2s, 3s… so a struggling server gets a moment
         handler.postDelayed({ if (current?.url == ch.url) startSource(ch) }, 1000L * reconnects)
     }
 
@@ -411,18 +640,6 @@ class MainActivity : AppCompatActivity() {
             }
             handler.postDelayed(this, 5_000)
         }
-    }
-
-    private fun step(delta: Int, auto: Boolean = false) {
-        if (filtered.isEmpty()) return
-        val size = filtered.size
-        var pos = filtered.indexOfFirst { it.url == current?.url }
-        for (i in 0 until size) {
-            pos = if (pos < 0) 0 else (pos + delta + size) % size
-            // When skipping automatically, jump over channels already known to be dead
-            if (!auto || store.health(filtered[pos].url) != false) break
-        }
-        play(filtered[pos], auto)
     }
 
     private val playerListener = object : Player.Listener {
@@ -444,12 +661,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (isPlaying) overlay.visibility = View.GONE
+        }
+
         override fun onPlayerError(error: PlaybackException) {
             loading.visibility = View.GONE
             val ch = current ?: return
             // A channel that was already playing just dropped out: reconnect instead of giving up
-            val transient = error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW ||
-                (playedOk && reconnects < maxReconnects)
+            val transient = error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW || playedOk
             if (transient && reconnects < maxReconnects) {
                 reconnect("connection dropped")
                 return
@@ -512,7 +732,77 @@ class MainActivity : AppCompatActivity() {
         overlay.visibility = View.VISIBLE
     }
 
-    // ------------------------------------------------------------------ layout & fullscreen
+    // ------------------------------------------------------------------ updates
+
+    private fun checkForUpdates(manual: Boolean) {
+        val now = System.currentTimeMillis()
+        if (!manual && now - store.lastUpdateCheck < 12 * 3600_000L) return
+        store.lastUpdateCheck = now
+        if (manual) toast("Checking for updates…")
+        Thread {
+            try {
+                val json = JSONObject(download("https://api.github.com/repos/${BuildConfig.REPO}/releases/latest"))
+                val tag = json.getString("tag_name")
+                val latest = tag.substringAfterLast('.').toIntOrNull() ?: 0
+                val assets = json.optJSONArray("assets")
+                var apkUrl: String? = null
+                if (assets != null) for (i in 0 until assets.length()) {
+                    val a = assets.getJSONObject(i)
+                    if (a.optString("name").endsWith(".apk")) apkUrl = a.optString("browser_download_url")
+                }
+                runOnUiThread {
+                    if (latest > BuildConfig.VERSION_CODE && apkUrl != null) showUpdateDialog(tag.removePrefix("v"), apkUrl)
+                    else if (manual) toast("You have the newest version (${BuildConfig.VERSION_NAME})")
+                }
+            } catch (e: Exception) {
+                if (manual) runOnUiThread { toast("Couldn't check for updates. Try again later.") }
+            }
+        }.start()
+    }
+
+    private fun showUpdateDialog(version: String, apkUrl: String) {
+        if (isFinishing) return
+        AlertDialog.Builder(this)
+            .setTitle("Update available")
+            .setMessage("CanoeTV $version is ready (you have ${BuildConfig.VERSION_NAME}).\n\nInstall it now? Your favourites and settings are kept.")
+            .setPositiveButton("Install") { _, _ -> downloadAndInstall(apkUrl) }
+            .setNegativeButton("Later", null)
+            .show()
+    }
+
+    private fun downloadAndInstall(apkUrl: String) {
+        toast("Downloading update…")
+        Thread {
+            try {
+                val dir = File(cacheDir, "updates").apply { mkdirs() }
+                val file = File(dir, "CanoeTV.apk")
+                val conn = open(apkUrl, timeoutMs = 60_000)
+                try {
+                    if (conn.responseCode != 200) throw Exception("HTTP ${conn.responseCode}")
+                    conn.inputStream.use { input -> file.outputStream().use { input.copyTo(it) } }
+                } finally {
+                    conn.disconnect()
+                }
+                runOnUiThread { installApk(file) }
+            } catch (e: Exception) {
+                runOnUiThread { toast("Update download failed. Try again later.") }
+            }
+        }.start()
+    }
+
+    private fun installApk(file: File) {
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+            val intent = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        } catch (e: Exception) {
+            toast("Couldn't open the installer.")
+        }
+    }
+
+    // ------------------------------------------------------------------ layout, fullscreen & picture-in-picture
 
     private fun setFullscreen(on: Boolean) {
         fullscreen = on
@@ -532,7 +822,7 @@ class MainActivity : AppCompatActivity() {
         val land = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val mp = ViewGroup.LayoutParams.MATCH_PARENT
         when {
-            fullscreen -> {
+            fullscreen || inPip -> {
                 listPanel.visibility = View.GONE
                 playerBox.layoutParams = LinearLayout.LayoutParams(mp, mp)
             }
@@ -557,17 +847,45 @@ class MainActivity : AppCompatActivity() {
         applyLayout()
     }
 
-    // TV remote: channel up/down anywhere; D-pad up/down in fullscreen when the controls are hidden
+    // Leaving the app while a channel plays (phones/tablets): keep watching in a small floating window
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isTv() && player.isPlaying) {
+            try {
+                enterPictureInPictureMode(PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build())
+            } catch (e: Exception) { /* device doesn't support it */ }
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        inPip = isInPictureInPictureMode
+        playerView.useController = !inPip
+        if (inPip) { banner.visibility = View.GONE; overlay.visibility = View.GONE }
+        applyLayout()
+    }
+
+    // ------------------------------------------------------------------ TV remote
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_CHANNEL_UP -> { step(-1); return true }
-                KeyEvent.KEYCODE_CHANNEL_DOWN -> { step(1); return true }
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
-                    if (fullscreen && !playerView.isControllerFullyVisible) {
-                        step(if (event.keyCode == KeyEvent.KEYCODE_DPAD_UP) -1 else 1)
-                        return true
-                    }
+            val typing = currentFocus is EditText
+            val code = event.keyCode
+            when {
+                code == KeyEvent.KEYCODE_CHANNEL_UP -> { step(-1); return true }
+                code == KeyEvent.KEYCODE_CHANNEL_DOWN -> { step(1); return true }
+                code == KeyEvent.KEYCODE_LAST_CHANNEL -> { lastChannel(); return true }
+                code == KeyEvent.KEYCODE_MENU -> { showMenu(); return true }
+                !typing && code in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> {
+                    typeDigit(code - KeyEvent.KEYCODE_0); return true
+                }
+                !typing && code in KeyEvent.KEYCODE_NUMPAD_0..KeyEvent.KEYCODE_NUMPAD_9 -> {
+                    typeDigit(code - KeyEvent.KEYCODE_NUMPAD_0); return true
+                }
+                (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN) &&
+                    fullscreen && !playerView.isControllerFullyVisible -> {
+                    step(if (code == KeyEvent.KEYCODE_DPAD_UP) -1 else 1)
+                    return true
                 }
             }
         }
@@ -592,8 +910,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        checkGen++
         player.release()
         io.shutdownNow()
+        checkPool.shutdownNow()
         super.onDestroy()
     }
 

@@ -56,6 +56,22 @@ class Store(context: Context) {
         p.edit().putString("health", health.toString()).apply()
     }
 
+    /** Save many results with a single write (used by the background channel check). */
+    fun setHealthBatch(results: Map<String, Boolean>) {
+        if (results.isEmpty()) return
+        val now = System.currentTimeMillis()
+        for ((url, ok) in results) health.put(url, JSONArray().put(ok).put(now))
+        if (health.length() > 8000) {
+            val keys = health.keys().asSequence().take(health.length() - 8000).toList()
+            keys.forEach { health.remove(it) }
+        }
+        p.edit().putString("health", health.toString()).apply()
+    }
+
+    var lastUpdateCheck: Long
+        get() = p.getLong("lastUpdateCheck", 0L)
+        set(v) = p.edit().putLong("lastUpdateCheck", v).apply()
+
     /** Forget all offline/working marks, e.g. after switching networks or turning on a VPN. */
     fun clearHealth() {
         health.keys().asSequence().toList().forEach { health.remove(it) }
