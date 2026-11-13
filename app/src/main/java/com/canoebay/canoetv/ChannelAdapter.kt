@@ -11,8 +11,11 @@ import coil.load
 
 class ChannelAdapter(
     private val store: Store,
+    private val nowShowing: (Channel) -> String?,
+    private val isLocked: (Channel) -> Boolean,
     private val onClick: (Channel) -> Unit,
     private val onToggleFav: (Channel) -> Unit,
+    private val onOptions: (Channel) -> Unit,
 ) : RecyclerView.Adapter<ChannelAdapter.VH>() {
 
     var items: List<Channel> = emptyList()
@@ -23,6 +26,7 @@ class ChannelAdapter(
         val num: TextView = v.findViewById(R.id.num)
         val logo: ImageView = v.findViewById(R.id.logo)
         val name: TextView = v.findViewById(R.id.name)
+        val nowShow: TextView = v.findViewById(R.id.nowShow)
         val dot: TextView = v.findViewById(R.id.dot)
         val star: TextView = v.findViewById(R.id.star)
     }
@@ -55,7 +59,7 @@ class ChannelAdapter(
         val c = items[position]
         val ctx = h.itemView.context
         h.num.text = c.number.toString()
-        h.name.text = c.name
+        h.name.text = if (isLocked(c)) "🔒 ${c.name}" else c.name
         if (c.logo.isNotEmpty()) {
             h.logo.load(c.logo) {
                 placeholder(R.drawable.logo_placeholder)
@@ -64,6 +68,14 @@ class ChannelAdapter(
             }
         } else {
             h.logo.setImageResource(R.drawable.logo_placeholder)
+        }
+
+        val show = nowShowing(c)
+        if (show != null) {
+            h.nowShow.text = show
+            h.nowShow.visibility = View.VISIBLE
+        } else {
+            h.nowShow.visibility = View.GONE
         }
 
         val health = store.health(c.url)
@@ -82,7 +94,7 @@ class ChannelAdapter(
 
         h.itemView.isSelected = c.url == playingUrl
         h.itemView.setOnClickListener { onClick(c) }
-        // Long-press (or long-press OK on a TV remote) toggles favourite
-        h.itemView.setOnLongClickListener { onToggleFav(c); true }
+        // Long-press (or long-press OK on a TV remote) opens channel options
+        h.itemView.setOnLongClickListener { onOptions(c); true }
     }
 }

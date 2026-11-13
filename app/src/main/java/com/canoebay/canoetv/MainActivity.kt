@@ -1,6 +1,8 @@
 package com.canoebay.canoetv
 
+import android.app.Activity
 import android.app.AlertDialog
+import android.content.ActivityNotFoundException
 import android.app.PictureInPictureParams
 import android.content.Intent
 import android.content.res.Configuration
@@ -9,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
+import android.text.InputType
 import android.text.TextWatcher
 import android.util.Rational
 import android.view.KeyEvent
@@ -26,6 +29,7 @@ import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -102,6 +106,9 @@ class MainActivity : AppCompatActivity() {
     private var inPip = false
     private var skipCount = 0
     private var loadToken = 0
+    private lateinit var epg: Epg
+    private val guideCatalog = LinkedHashSet<String>()
+    private var unlocked = false // parental lock opened with the PIN this session
 
     private val handler = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
@@ -131,6 +138,7 @@ class MainActivity : AppCompatActivity() {
         list = findViewById(R.id.list)
 
         store = Store(this)
+        epg = Epg(File(filesDir, "epg").apply { mkdirs() })
 
         // Bigger buffer than the default so short network hiccups don't interrupt playback
         val loadControl = DefaultLoadControl.Builder()
@@ -144,8 +152,11 @@ class MainActivity : AppCompatActivity() {
 
         adapter = ChannelAdapter(
             store,
+            nowShowing = { ch -> epg.now(ch.tvgId)?.let { "Now: ${it.title}" } },
+            isLocked = { ch -> isLockedGroup(ch) },
             onClick = { ch -> if (ch.url == current?.url && player.isPlaying) setFullscreen(true) else play(ch, auto = false) },
             onToggleFav = { ch -> toggleFav(ch) },
+            onOptions = { ch -> showChannelOptions(ch) },
         )
         list.layoutManager = LinearLayoutManager(this)
         list.adapter = adapter
@@ -192,28 +203,23 @@ class MainActivity : AppCompatActivity() {
             val mins = ((sleepAt - System.currentTimeMillis()) / 60_000).coerceAtLeast(1)
             "⏾ Sleep timer (stops in $mins min)"
         } else "⏾ Sleep timer"
-        val items = arrayOf(
-            "⇄ Last channel",
-            sleepLabel,
-            "↻ Retry offline channels",
-            "+ Add playlist URL",
-            "– Remove a custom playlist",
-            "⬆ Check for updates",
-            "ℹ About CanoeTV",
+        val actions = listOf<Pair<String, () -> Unit>>(
+            "📺 TV guide — this channel" to { current?.let { showGuide(it) } ?: toast("Play a channel first") },
+            "⇄ Last channel" to { lastChannel() },
+            "▦ Multi-view (watch up to 4)" to { pickMultiView() },
+            sleepLabel to { showSleepTimer() },
+            "🙈 Show / hide categories" to { showHideCategories() },
+            "🔒 Parental lock" to { showParentalLock() },
+            "↻ Retry offline channels" to { retryOffline() },
+            "+ Add playlist URL" to { showAddDialog() },
+            "– Remove a custom playlist" to { showRemoveDialog() },
+            "💾 Back up / restore" to { showBackup() },
+            "⬆ Check for updates" to { checkForUpdates(manual = true) },
+            "ℹ About CanoeTV" to { showAbout() },
         )
         AlertDialog.Builder(this)
             .setTitle("CanoeTV")
-            .setItems(items) { _, i ->
-                when (i) {
-                    0 -> lastChannel()
-                    1 -> showSleepTimer()
-                    2 -> retryOffline()
-                    3 -> showAddDialog()
-                    4 -> showRemoveDialog()
-                    5 -> checkForUpdates(manual = true)
-                    6 -> showAbout()
-                }
-            }
+            .setItems(actions.map { it.first }.toTypedArray()) { _, i -> actions[i].second() }
             .show()
     }
 
@@ -224,7 +230,7 @@ class MainActivity : AppCompatActivity() {
                 "Free channels from Free-TV and iptv-org.\n\n" +
                     "Remote tips:\n• OK — play / OK again for full screen\n• Up/Down in full screen — change channel\n" +
                     "• Number keys — jump to a channel number\n• 0 or Last — back to the previous channel\n" +
-                    "• Long-press OK — add to favourites\n• Menu — this menu"
+                    "• Long-press OK — channel options (favourite, guide, rename, move)\n• Menu — this menu"
             )
             .setPositiveButton("OK", null)
             .show()
@@ -235,6 +241,293 @@ class MainActivity : AppCompatActivity() {
         skipCount = 0
         applyFilter()
         toast("Offline marks cleared — all channels will be tried again.")
+    }
+
+    // ------------------------------------------------------------------ TV guide
+
+    private val timeFmt = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
+    private fun hhmm(t: Long): String = timeFmt.format(java.util.Date(t))
+
+    /** Downloads guide data for the countries of the channels you actually watch (max 4 at a time). */
+    private fun refreshGuide() {
+        if (channels.isEmpty()) return
+        val ids = channels.mapNotNull { c -> Epg.norm(c.tvgId).takeIf { it.isNotEmpty() } }.toHashSet()
+        if (ids.isEmpty()) return
+        val interest = listOfNotNull(current) +
+            store.favOrder.mapNotNull { byUrl[it] } +
+            store.recents.take(20).mapNotNull { byUrl[it] }
+        val countries = interest.mapNotNull { c ->
+            Epg.norm(c.tvgId).substringAfterLast('.', "").takeIf { it.length in 2..3 && it.all { ch -> ch.isLetter() } }
+        }.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }.map { it.key }.take(4)
+        val urls = ArrayList<String>()
+        for (cc in countries) {
+            val code = cc.uppercase(java.util.Locale.ROOT)
+            urls.add(guideCatalog.firstOrNull { it.contains("_${code}1.xml") }
+                ?: "https://epgshare01.online/epgshare01/epg_ripper_${code}1.xml.gz")
+        }
+        // Guides a custom playlist names itself (not the big shared list)
+        urls.addAll(guideCatalog.filter { !it.contains("epgshare01") }.take(2))
+        if (urls.isEmpty()) return
+        epg.load(urls, ids, ::downloadToFile) {
+            runOnUiThread {
+                adapter.notifyDataSetChanged()
+                if (banner.visibility == View.VISIBLE) current?.let { showBanner(it) }
+            }
+        }
+    }
+
+    private fun downloadToFile(url: String, file: File) {
+        val conn = open(url, timeoutMs = 60_000)
+        try {
+            if (conn.responseCode != 200) throw Exception("HTTP ${conn.responseCode}")
+            conn.inputStream.use { input -> file.outputStream().use { input.copyTo(it) } }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun showGuide(ch: Channel) {
+        val progs = epg.upcoming(ch.tvgId)
+        val msg = if (progs.isEmpty()) {
+            "No guide information for this channel yet.\n\nGuides download in the background for the countries you watch, " +
+                "so check again in a minute. Not every free channel has a guide."
+        } else {
+            val t = System.currentTimeMillis()
+            progs.joinToString("\n") { p ->
+                val mark = if (p.start <= t && t < p.stop) "▶ " else "    "
+                "$mark${hhmm(p.start)}   ${p.title}"
+            }
+        }
+        val now = epg.now(ch.tvgId)
+        AlertDialog.Builder(this)
+            .setTitle("📺 ${ch.name}")
+            .setMessage(if (now != null && now.desc.isNotEmpty()) "$msg\n\nNow: ${now.title}\n${now.desc}" else msg)
+            .setPositiveButton("Watch") { _, _ -> if (ch.url != current?.url) play(ch, auto = false) }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    // ------------------------------------------------------------------ channel options (long-press)
+
+    private fun showChannelOptions(ch: Channel) {
+        val inFavView = groupKeys.getOrNull(groupSpinner.selectedItemPosition) == KEY_FAV
+        val actions = ArrayList<Pair<String, () -> Unit>>()
+        actions.add((if (ch.url in store.favs) "☆ Remove from favourites" else "★ Add to favourites") to { toggleFav(ch) })
+        actions.add("📺 TV guide" to { showGuide(ch) })
+        actions.add("✎ Rename" to { renameChannel(ch) })
+        if (inFavView && ch.url in store.favs) {
+            actions.add("↑ Move up" to { store.moveFav(ch.url, -1); applyFilter() })
+            actions.add("↓ Move down" to { store.moveFav(ch.url, 1); applyFilter() })
+        }
+        actions.add("🙈 Hide category \"${ch.group}\"" to {
+            store.hiddenGroups.add(ch.group); store.saveHidden(); buildGroups(); applyFilter()
+            toast("Hidden. Bring it back from ⋮ → Show / hide categories")
+        })
+        AlertDialog.Builder(this)
+            .setTitle(ch.name)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, i -> actions[i].second() }
+            .show()
+    }
+
+    private fun renameChannel(ch: Channel) {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val input = EditText(this).apply { setText(ch.name); setSingleLine(); setSelectAllOnFocus(true) }
+        val box = FrameLayout(this).apply { setPadding(pad, pad, pad, 0); addView(input) }
+        AlertDialog.Builder(this)
+            .setTitle("Rename channel")
+            .setView(box)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isEmpty()) return@setPositiveButton
+                store.rename(ch.url, name)
+                ch.name = name
+                adapter.refresh(ch.url)
+                if (ch.url == current?.url) nowPlaying.text = name
+            }
+            .setNeutralButton("Reset name") { _, _ -> store.rename(ch.url, null); toast("Original name returns next time the list loads") }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showHideCategories() {
+        val groups = channels.map { it.group }.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
+        if (groups.isEmpty()) return
+        val checked = BooleanArray(groups.size) { groups[it] !in store.hiddenGroups }
+        AlertDialog.Builder(this)
+            .setTitle("Show these categories")
+            .setMultiChoiceItems(groups.toTypedArray(), checked) { _, i, on -> checked[i] = on }
+            .setPositiveButton("Save") { _, _ ->
+                store.hiddenGroups.removeAll(groups.toSet())
+                groups.forEachIndexed { i, g -> if (!checked[i]) store.hiddenGroups.add(g) }
+                store.saveHidden()
+                buildGroups(); applyFilter()
+            }
+            .setNeutralButton("Show all") { _, _ ->
+                store.hiddenGroups.clear(); store.saveHidden(); buildGroups(); applyFilter()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // ------------------------------------------------------------------ parental lock
+
+    private val adultWords = Regex("(?i)\\b(xxx|adult|18\\+|porn|erotic)")
+
+    private fun isLockedGroup(ch: Channel) = store.pin != null && ch.group in store.lockedGroups
+    private fun needsPin(ch: Channel) = isLockedGroup(ch) && !unlocked
+
+    private fun askPin(title: String, onOk: () -> Unit) {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            hint = "PIN"
+        }
+        val box = FrameLayout(this).apply { setPadding(pad, pad, pad, 0); addView(input) }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(box)
+            .setPositiveButton("OK") { _, _ ->
+                if (input.text.toString() == store.pin) onOk() else toast("Wrong PIN")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showParentalLock() {
+        if (store.pin == null) { setNewPin(); return }
+        askPin("Enter your PIN") {
+            val actions = listOf<Pair<String, () -> Unit>>(
+                "Choose locked categories" to { chooseLockedGroups() },
+                "Change PIN" to { setNewPin() },
+                "Turn parental lock off" to {
+                    store.pin = null; store.lockedGroups.clear(); store.saveLocked(); unlocked = false
+                    adapter.notifyDataSetChanged(); toast("Parental lock is off")
+                },
+                (if (unlocked) "Lock again now" else "Keep unlocked until the app closes") to {
+                    unlocked = !unlocked; adapter.notifyDataSetChanged()
+                },
+            )
+            AlertDialog.Builder(this)
+                .setTitle("🔒 Parental lock")
+                .setItems(actions.map { it.first }.toTypedArray()) { _, i -> actions[i].second() }
+                .show()
+        }
+    }
+
+    private fun setNewPin() {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            hint = "4 to 8 digits"
+        }
+        val box = FrameLayout(this).apply { setPadding(pad, pad, pad, 0); addView(input) }
+        AlertDialog.Builder(this)
+            .setTitle("Choose a PIN")
+            .setMessage("You'll need this PIN to watch locked categories or change the lock.")
+            .setView(box)
+            .setPositiveButton("Next") { _, _ ->
+                val pin = input.text.toString()
+                if (pin.length !in 4..8) { toast("The PIN must be 4 to 8 digits"); return@setPositiveButton }
+                store.pin = pin
+                unlocked = false
+                if (store.lockedGroups.isEmpty()) {
+                    channels.map { it.group }.filter { adultWords.containsMatchIn(it) }.forEach { store.lockedGroups.add(it) }
+                    store.saveLocked()
+                }
+                chooseLockedGroups()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun chooseLockedGroups() {
+        val groups = (channels.map { it.group } + store.lockedGroups).distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
+        if (groups.isEmpty()) return
+        val checked = BooleanArray(groups.size) { groups[it] in store.lockedGroups }
+        AlertDialog.Builder(this)
+            .setTitle("Lock these categories")
+            .setMultiChoiceItems(groups.toTypedArray(), checked) { _, i, on -> checked[i] = on }
+            .setPositiveButton("Save") { _, _ ->
+                store.lockedGroups.clear()
+                groups.forEachIndexed { i, g -> if (checked[i]) store.lockedGroups.add(g) }
+                store.saveLocked()
+                adapter.notifyDataSetChanged()
+                toast("${store.lockedGroups.size} categories locked")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // ------------------------------------------------------------------ backup / restore
+
+    private val exportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri == null) return@registerForActivityResult
+        try {
+            contentResolver.openOutputStream(uri)?.use { it.write(store.exportJson().toByteArray()) }
+            toast("Backup saved")
+        } catch (e: Exception) {
+            toast("Couldn't save the backup")
+        }
+    }
+
+    private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        try {
+            val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+            val n = store.importJson(text)
+            toast("Restored $n favourites and your settings")
+            loadedSourceId = null
+            setupSources(selectId = store.sourceId)
+        } catch (e: Exception) {
+            toast("That file isn't a CanoeTV backup")
+        }
+    }
+
+    private fun showBackup() {
+        AlertDialog.Builder(this)
+            .setTitle("💾 Back up / restore")
+            .setMessage("Saves your favourites (in order), renamed channels, hidden and locked categories and your own playlists to a file. Restore it on another phone or TV to copy everything across. Your PIN is not saved.")
+            .setPositiveButton("Save backup") { _, _ ->
+                try { exportLauncher.launch("CanoeTV-backup.json") } catch (e: ActivityNotFoundException) { noFilePicker() }
+            }
+            .setNeutralButton("Restore") { _, _ ->
+                try { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) } catch (e: ActivityNotFoundException) { noFilePicker() }
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun noFilePicker() = toast("This device has no file picker. Make backups on your phone instead.")
+
+    // ------------------------------------------------------------------ multi-view
+
+    private val multiLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        if (res.resultCode == Activity.RESULT_OK) {
+            res.data?.getStringExtra(MultiViewActivity.RESULT_URL)?.let { url -> byUrl[url]?.let { play(it, auto = false) } }
+        }
+    }
+
+    private fun pickMultiView() {
+        val pool = (store.favOrder.mapNotNull { byUrl[it] } + store.recents.mapNotNull { byUrl[it] })
+            .distinctBy { it.url }.filter { !needsPin(it) }.take(30)
+        if (pool.size < 2) { toast("Add at least 2 favourites (or watch a few channels) to use multi-view"); return }
+        val checked = BooleanArray(pool.size) { it < 4 && pool[it].url in store.favs }
+        AlertDialog.Builder(this)
+            .setTitle("Pick up to 4 channels")
+            .setMultiChoiceItems(pool.map { it.name }.toTypedArray(), checked) { _, i, on -> checked[i] = on }
+            .setPositiveButton("Watch") { _, _ ->
+                val chosen = pool.filterIndexed { i, _ -> checked[i] }.take(4)
+                if (chosen.size < 2) { toast("Pick at least 2 channels"); return@setPositiveButton }
+                player.pause()
+                val intent = Intent(this, MultiViewActivity::class.java)
+                    .putStringArrayListExtra(MultiViewActivity.EXTRA_NAMES, ArrayList(chosen.map { it.name }))
+                    .putStringArrayListExtra(MultiViewActivity.EXTRA_URLS, ArrayList(chosen.map { it.url }))
+                    .putStringArrayListExtra(MultiViewActivity.EXTRA_UAS, ArrayList(chosen.map { it.userAgent ?: "" }))
+                    .putStringArrayListExtra(MultiViewActivity.EXTRA_REFS, ArrayList(chosen.map { it.referrer ?: "" }))
+                multiLauncher.launch(intent)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     // ------------------------------------------------------------------ sleep timer
@@ -292,6 +585,7 @@ class MainActivity : AppCompatActivity() {
         if (current == null) showMessage("Loading ${src.name}…", error = false)
         io.execute {
             val all = LinkedHashMap<String, Channel>()
+            val guides = ArrayList<String>()
             var failed = 0
             for (u in src.urls) {
                 val text = try {
@@ -300,17 +594,25 @@ class MainActivity : AppCompatActivity() {
                     failed++
                     cacheFile(u).takeIf { it.exists() }?.readText()
                 }
-                if (text != null) for (c in M3u.parse(text)) all.putIfAbsent(c.url, c)
+                if (text != null) {
+                    guides.addAll(M3u.guideUrls(text))
+                    for (c in M3u.parse(text)) all.putIfAbsent(c.url, c)
+                }
             }
             val result = all.values.toList()
-            result.forEachIndexed { i, c -> c.number = i + 1 }
+            result.forEachIndexed { i, c ->
+                c.number = i + 1
+                store.renamed(c.url)?.let { c.name = it }
+            }
             runOnUiThread {
                 if (token != loadToken) return@runOnUiThread
+                guideCatalog.addAll(guides)
                 channels = result
                 byUrl = result.associateBy { it.url }
                 store.sourceId = src.id
                 buildGroups()
                 applyFilter()
+                refreshGuide()
                 when {
                     result.isEmpty() -> showMessage("Couldn't load this playlist. Check your internet connection and try again.", error = true)
                     failed > 0 -> toast("Some of the playlist couldn't be downloaded — showing what loaded.")
@@ -399,10 +701,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildGroups() {
         val prev = groupKeys.getOrNull(groupSpinner.selectedItemPosition)
-        val counts = channels.groupingBy { it.group }.eachCount().toSortedMap(String.CASE_INSENSITIVE_ORDER)
+        val visible = channels.filter { it.group !in store.hiddenGroups }
+        val counts = visible.groupingBy { it.group }.eachCount().toSortedMap(String.CASE_INSENSITIVE_ORDER)
         val favCount = channels.count { it.url in store.favs }
         groupKeys = listOf(KEY_ALL, KEY_FAV, KEY_RECENT) + counts.keys
-        val labels = listOf("All channels (${channels.size})", "★ Favourites ($favCount)", "⟲ Recently watched") +
+        val labels = listOf("All channels (${visible.size})", "★ Favourites ($favCount)", "⟲ Recently watched") +
             counts.map { (g, n) -> "$g ($n)" }
         groupSpinner.adapter = ArrayAdapter(this, R.layout.spinner_item, labels).also {
             it.setDropDownViewResource(R.layout.spinner_item)
@@ -415,8 +718,8 @@ class MainActivity : AppCompatActivity() {
         if (!::adapter.isInitialized) return
         val key = groupKeys.getOrNull(groupSpinner.selectedItemPosition) ?: KEY_ALL
         var base = when (key) {
-            KEY_ALL -> channels
-            KEY_FAV -> channels.filter { it.url in store.favs }
+            KEY_ALL -> channels.filter { it.group !in store.hiddenGroups }
+            KEY_FAV -> store.favOrder.mapNotNull { byUrl[it] }
             KEY_RECENT -> store.recents.mapNotNull { byUrl[it] }
             else -> channels.filter { it.group == key }
         }
@@ -506,6 +809,11 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ playback
 
     private fun play(ch: Channel, auto: Boolean) {
+        if (needsPin(ch)) {
+            if (auto) return
+            askPin("Enter your PIN to watch ${ch.name}") { unlocked = true; adapter.notifyDataSetChanged(); play(ch, auto = false) }
+            return
+        }
         handler.removeCallbacks(skipRunnable)
         if (!auto) skipCount = 0
         val prev = current
@@ -521,6 +829,7 @@ class MainActivity : AppCompatActivity() {
         reconnects = 0
         showBanner(ch)
         startSource(ch)
+        refreshGuide()
 
         val pos = filtered.indexOfFirst { it.url == ch.url }
         if (pos >= 0) list.scrollToPosition(pos)
@@ -530,19 +839,7 @@ class MainActivity : AppCompatActivity() {
     private fun startSource(ch: Channel) {
         bufferingSince = 0L
         reconnectPending = false
-        val http = DefaultHttpDataSource.Factory()
-            .setUserAgent(ch.userAgent ?: UA)
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(15_000)
-        ch.referrer?.let { http.setDefaultRequestProperties(mapOf("Referer" to it)) }
-
-        val item = MediaItem.Builder().setUri(ch.url).apply {
-            if (ch.url.contains(".m3u8", ignoreCase = true)) setMimeType(MimeTypes.APPLICATION_M3U8)
-            else if (ch.url.contains(".mpd", ignoreCase = true)) setMimeType(MimeTypes.APPLICATION_MPD)
-        }.build()
-
-        player.setMediaSource(DefaultMediaSourceFactory(http).createMediaSource(item))
+        player.setMediaSource(Streams.source(ch))
         player.prepare()
         player.playWhenReady = true
     }
@@ -560,7 +857,7 @@ class MainActivity : AppCompatActivity() {
         for (i in 0 until size) {
             pos = if (pos < 0) 0 else (pos + delta + size) % size
             // When skipping automatically, jump over channels already known to be dead
-            if (!auto || store.health(filtered[pos].url) != false) break
+            if (!auto || (store.health(filtered[pos].url) != false && !needsPin(filtered[pos]))) break
         }
         play(filtered[pos], auto)
     }
@@ -579,7 +876,13 @@ class MainActivity : AppCompatActivity() {
             }
         } else bannerLogo.setImageResource(R.drawable.logo_placeholder)
         bannerTitle.text = "${ch.number}   ${ch.name}"
-        bannerSub.text = ch.group
+        val now = epg.now(ch.tvgId)
+        val next = epg.next(ch.tvgId)
+        bannerSub.text = when {
+            now != null && next != null -> "Now: ${now.title}   ·   ${hhmm(next.start)} ${next.title}"
+            now != null -> "Now: ${now.title}"
+            else -> ch.group
+        }
         banner.visibility = View.VISIBLE
         handler.removeCallbacks(hideBanner)
         handler.postDelayed(hideBanner, 4_000)
@@ -914,6 +1217,7 @@ class MainActivity : AppCompatActivity() {
         player.release()
         io.shutdownNow()
         checkPool.shutdownNow()
+        epg.shutdown()
         super.onDestroy()
     }
 

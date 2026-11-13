@@ -1,12 +1,13 @@
 package com.canoebay.canoetv
 
 data class Channel(
-    val name: String,
+    var name: String,
     val url: String,
     val logo: String,
     val group: String,
     val userAgent: String?,
     val referrer: String?,
+    val tvgId: String = "",
 ) {
     var number: Int = 0
 }
@@ -36,6 +37,15 @@ object Sources {
 
 object M3u {
     private val attrRe = Regex("""([\w-]+)="([^"]*)"""")
+    private val guideRe = Regex("""(?:x-tvg-url|url-tvg)="([^"]*)"""", RegexOption.IGNORE_CASE)
+
+    /** TV-guide links listed in the playlist's #EXTM3U header line. */
+    fun guideUrls(text: String): List<String> {
+        val header = text.lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: return emptyList()
+        if (!header.startsWith("#EXTM3U", ignoreCase = true)) return emptyList()
+        return guideRe.findAll(header).flatMap { m -> m.groupValues[1].split(',').asSequence() }
+            .map { it.trim() }.filter { it.startsWith("http") }.toList()
+    }
 
     fun parse(text: String): List<Channel> {
         val out = ArrayList<Channel>()
@@ -45,6 +55,7 @@ object M3u {
         var group = "Uncategorized"
         var ua: String? = null
         var ref: String? = null
+        var tvg = ""
 
         for (raw in text.lineSequence()) {
             val line = raw.trim()
@@ -60,6 +71,7 @@ object M3u {
                     group = (attrs["group-title"] ?: "").split(';').first().trim().ifEmpty { "Uncategorized" }
                     ua = attrs["http-user-agent"] ?: attrs["user-agent"]
                     ref = attrs["http-referrer"] ?: attrs["referrer"]
+                    tvg = attrs["tvg-id"] ?: ""
                     pending = true
                 }
                 line.startsWith("#EXTGRP:", ignoreCase = true) -> {
@@ -78,11 +90,11 @@ object M3u {
                 line.startsWith("#") -> Unit
                 else -> {
                     if (pending) {
-                        out.add(Channel(name, line, logo, group, ua, ref))
+                        out.add(Channel(name, line, logo, group, ua, ref, tvg))
                     } else {
                         out.add(Channel(line.substringAfterLast('/').ifEmpty { "Stream" }, line, "", "Uncategorized", null, null))
                     }
-                    pending = false; name = ""; logo = ""; group = "Uncategorized"; ua = null; ref = null
+                    pending = false; name = ""; logo = ""; group = "Uncategorized"; ua = null; ref = null; tvg = ""
                 }
             }
         }
