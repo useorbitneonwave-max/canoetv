@@ -34,6 +34,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
@@ -111,7 +112,16 @@ class MainActivity : AppCompatActivity() {
 
         store = Store(this)
 
-        player = ExoPlayer.Builder(this).build()
+        // Bigger buffer than the default so short network hiccups don't interrupt playback
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 30_000,
+                /* maxBufferMs = */ 90_000,
+                /* bufferForPlaybackMs = */ 2_500,
+                /* bufferForPlaybackAfterRebufferMs = */ 6_000,
+            )
+            .build()
+        player = ExoPlayer.Builder(this).setLoadControl(loadControl).build()
         player.addListener(playerListener)
         playerView.player = player
         playerView.keepScreenOn = true
@@ -338,7 +348,18 @@ class MainActivity : AppCompatActivity() {
         adapter.setPlaying(ch.url)
         overlay.visibility = View.GONE
         loading.visibility = View.VISIBLE
+        playedOk = false
+        reconnects = 0
+        startSource(ch)
 
+        val pos = filtered.indexOfFirst { it.url == ch.url }
+        if (pos >= 0) list.scrollToPosition(pos)
+    }
+
+    /** Loads the channel's stream into the player and starts it at the live edge. */
+    private fun startSource(ch: Channel) {
+        bufferingSince = 0L
+        reconnectPending = false
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent(ch.userAgent ?: UA)
             .setAllowCrossProtocolRedirects(true)
@@ -354,9 +375,42 @@ class MainActivity : AppCompatActivity() {
         player.setMediaSource(DefaultMediaSourceFactory(http).createMediaSource(item))
         player.prepare()
         player.playWhenReady = true
+    }
 
-        val pos = filtered.indexOfFirst { it.url == ch.url }
-        if (pos >= 0) list.scrollToPosition(pos)
+    // ------------------------------------------------------------------ auto-reconnect
+
+    private var playedOk = false        // current channel has played at least once
+    private var reconnects = 0          // reconnect attempts since it last played
+    private var bufferingSince = 0L     // when the current stall started (0 = not stalled)
+    private val maxReconnects = 6
+    private var reconnectPending = false
+
+    /** A live stream that stopped, stalled or dropped: reload it at the live edge. */
+    private fun reconnect(why: String) {
+        val ch = current ?: return
+        if (reconnects >= maxReconnects || reconnectPending) return
+        reconnectPending = true
+        reconnects++
+        handler.removeCallbacks(skipRunnable)
+        loading.visibility = View.VISIBLE
+        status.text = "Reconnecting… ($why)"
+        // Short back-off: 1s, 2s, 3s… so a struggling server gets a moment
+        handler.postDelayed({ if (current?.url == ch.url) startSource(ch) }, 1000L * reconnects)
+    }
+
+    /** Every few seconds, check for a stream that is stuck loading or silently stopped. */
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (current != null && player.playWhenReady) {
+                val now = System.currentTimeMillis()
+                when (player.playbackState) {
+                    Player.STATE_BUFFERING ->
+                        if (playedOk && bufferingSince > 0 && now - bufferingSince > 15_000) reconnect("stalled")
+                    Player.STATE_ENDED -> if (playedOk) reconnect("stream ended")
+                }
+            }
+            handler.postDelayed(this, 5_000)
+        }
     }
 
     private fun step(delta: Int, auto: Boolean = false) {
@@ -374,17 +428,32 @@ class MainActivity : AppCompatActivity() {
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(state: Int) {
             loading.visibility = if (state == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
-            if (state == Player.STATE_READY) {
-                overlay.visibility = View.GONE
-                current?.let {
-                    if (store.health(it.url) != true) { store.setHealth(it.url, true); adapter.refresh(it.url) }
+            bufferingSince = if (state == Player.STATE_BUFFERING) System.currentTimeMillis() else 0L
+            when (state) {
+                Player.STATE_READY -> {
+                    overlay.visibility = View.GONE
+                    if (reconnects > 0) status.text = "${filtered.size} channels"
+                    playedOk = true
+                    reconnects = 0
+                    current?.let {
+                        if (store.health(it.url) != true) { store.setHealth(it.url, true); adapter.refresh(it.url) }
+                    }
                 }
+                // Live channels should never "end" — if one does, the server hiccuped: pick it back up
+                Player.STATE_ENDED -> if (playedOk && player.playWhenReady) reconnect("stream ended")
             }
         }
 
         override fun onPlayerError(error: PlaybackException) {
             loading.visibility = View.GONE
             val ch = current ?: return
+            // A channel that was already playing just dropped out: reconnect instead of giving up
+            val transient = error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW ||
+                (playedOk && reconnects < maxReconnects)
+            if (transient && reconnects < maxReconnects) {
+                reconnect("connection dropped")
+                return
+            }
             store.setHealth(ch.url, false)
             adapter.refresh(ch.url)
             val willSkip = autoSkip.isChecked && skipCount < 15 && filtered.size > 1
@@ -509,11 +578,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (current != null) player.play()
+        handler.removeCallbacks(watchdog)
+        handler.postDelayed(watchdog, 5_000)
+        // Coming back to the app: jump to the live edge instead of resuming stale video
+        current?.let { reconnects = 0; startSource(it) }
     }
 
     override fun onStop() {
         super.onStop()
+        handler.removeCallbacks(watchdog)
         player.pause()
     }
 
