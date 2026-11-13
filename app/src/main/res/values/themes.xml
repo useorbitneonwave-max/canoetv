@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0B0D12</color>
+    <color name="panel">#12151D</color>
+    <color name="text">#E7E9EE</color>
+    <color name="muted">#8A91A3</color>
+    <color name="accent">#3DD6B5</color>
+    <color name="danger">#FF6B6B</color>
+    <color name="star">#FFC857</color>
+
+    <style name="Theme.CanoeTV" parent="Theme.AppCompat.NoActionBar">
+        <item name="colorPrimary">@color/panel</item>
+        <item name="colorPrimaryDark">@color/bg</item>
+        <item name="colorAccent">@color/accent</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+    </style>
+</resources>
