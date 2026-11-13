@@ -56,6 +56,12 @@ class Store(context: Context) {
         p.edit().putString("health", health.toString()).apply()
     }
 
+    /** Forget all offline/working marks, e.g. after switching networks or turning on a VPN. */
+    fun clearHealth() {
+        health.keys().asSequence().toList().forEach { health.remove(it) }
+        p.edit().putString("health", "{}").apply()
+    }
+
     // ---- custom playlists added by the user ----
     fun customSources(): List<Source> {
         val arr = try { JSONArray(p.getString("custom", "[]")) } catch (e: Exception) { JSONArray() }

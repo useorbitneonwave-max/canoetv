@@ -156,7 +156,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupSources(selectId: String) {
         sources = Sources.builtIn() + store.customSources()
         val labels = sources.map { if (it.custom) "📁 ${it.name}" else it.name } +
-            listOf("+ Add playlist URL…", "– Remove a custom playlist…")
+            listOf("+ Add playlist URL…", "– Remove a custom playlist…", "↻ Retry offline channels")
         sourceSpinner.adapter = ArrayAdapter(this, R.layout.spinner_item, labels).also {
             it.setDropDownViewResource(R.layout.spinner_item)
         }
@@ -167,6 +167,13 @@ class MainActivity : AppCompatActivity() {
                 when {
                     pos == sources.size -> { resetSourceSelection(); showAddDialog() }
                     pos == sources.size + 1 -> { resetSourceSelection(); showRemoveDialog() }
+                    pos == sources.size + 2 -> {
+                        resetSourceSelection()
+                        store.clearHealth()
+                        skipCount = 0
+                        applyFilter()
+                        toast("Offline marks cleared — all channels will be tried again.")
+                    }
                     sources[pos].id != loadedSourceId -> load(sources[pos])
                 }
             }
