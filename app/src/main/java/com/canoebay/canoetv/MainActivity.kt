@@ -399,15 +399,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun reason(e: PlaybackException): String {
-        val cause = e.cause
-        if (cause is HttpDataSource.InvalidResponseCodeException) {
-            return when (cause.responseCode) {
-                403, 451 -> "This channel is blocked in your region or by its provider."
-                404, 410 -> "This channel is offline."
-                in 500..599 -> "The channel's server is having problems right now."
-                else -> "The server refused the stream (error ${cause.responseCode})."
+    private fun reason(e: PlaybackException): String = explain(e) + "\n(code: ${e.errorCodeName})"
+
+    private fun explain(e: PlaybackException): String {
+        // Walk the cause chain for the real underlying problem
+        var c: Throwable? = e.cause
+        while (c != null) {
+            when (c) {
+                is HttpDataSource.InvalidResponseCodeException -> return when (c.responseCode) {
+                    401, 403, 451 -> "Blocked in your region, or the server blocks VPNs (HTTP ${c.responseCode}). If you're on a VPN, try a server in the channel's own country."
+                    404, 410 -> "This channel is offline — the stream no longer exists (HTTP ${c.responseCode})."
+                    in 500..599 -> "The channel's server is having problems right now (HTTP ${c.responseCode})."
+                    else -> "The server refused the stream (HTTP ${c.responseCode})."
+                }
+                is HttpDataSource.InvalidContentTypeException ->
+                    return "The server sent a web page instead of video. This usually means a region/VPN block or the channel has moved."
+                is java.net.UnknownHostException ->
+                    return "The channel's server address doesn't exist anymore, or your VPN's DNS can't find it."
+                is java.net.SocketTimeoutException ->
+                    return "The server took too long to answer. It may be offline, or your VPN server is too slow — try another VPN location."
+                is java.net.ConnectException ->
+                    return "Couldn't connect to the channel's server. It's probably offline."
+                is javax.net.ssl.SSLException ->
+                    return "The secure connection to the server failed. Try turning the VPN off and on, or another VPN location."
             }
+            c = c.cause
         }
         return when (e.errorCode) {
             PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
@@ -417,7 +433,7 @@ class MainActivity : AppCompatActivity() {
             PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
             PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED -> "This stream's format isn't supported on this device."
             PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> "The stream fell behind. Pick the channel again."
-            else -> "The stream may be offline or unavailable in your region."
+            else -> "The stream couldn't be played — most likely it's offline."
         }
     }
 
