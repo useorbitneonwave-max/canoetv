@@ -11,7 +11,12 @@ You can also add your own M3U playlist link.
 
 ## Download
 
-Get the newest APK from the **Releases** page. GitHub builds a new APK automatically every time the code changes.
+**Fire TV / Android TV:** open the **Downloader** app and enter code **8491975**
+
+**Phone / tablet / any browser:** https://github.com/useorbitneonwave-max/canoetv/releases/latest/download/CanoeTV.apk
+(short link: aftv.news/8491975)
+
+Both links always point to the newest version. Once it's installed, CanoeTV updates itself from **⋮ → Check for updates**.
 
 ## Using it
 

@@ -41,6 +41,7 @@ jobs:
           name: CanoeTV 1.0.${{ github.run_number }}
           body: |
             Download **CanoeTV.apk** below and install it on your Android phone, tablet, Android TV or Fire TV.
+            Fire TV / Android TV: enter code **8491975** in the Downloader app.
             Permanent link to the newest version: https://github.com/${{ github.repository }}/releases/latest/download/CanoeTV.apk
           files: CanoeTV.apk
           make_latest: true
