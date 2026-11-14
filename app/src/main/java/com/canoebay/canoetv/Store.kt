@@ -219,6 +219,11 @@ class Store(context: Context) {
         return true
     }
 
+    /** "standard", "smooth" (max 720p, further behind live) or "saver" (max 480p). */
+    var playbackMode: String
+        get() = p.getString("playbackMode", "standard") ?: "standard"
+        set(v) = p.edit().putString("playbackMode", v).apply()
+
     var welcomed: Boolean
         get() = p.getBoolean("welcomed", false)
         set(v) = p.edit().putBoolean("welcomed", v).apply()

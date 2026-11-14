@@ -1059,6 +1059,13 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         row("Retry offline channels", "Clear the red offline marks and test again") { retryOffline() }
 
         header("Playback")
+        row("Buffering & quality", playbackModeLabel()) { sv ->
+            store.playbackMode = when (store.playbackMode) { "standard" -> "smooth"; "smooth" -> "saver"; else -> "standard" }
+            autoLowered = false
+            sv.text = playbackModeLabel()
+            applyQuality()
+            current?.let { if (section == Section.LIVE || section == Section.GUIDE) { reconnects = 0; startSource(it) } }
+        }
         toggle("Hide offline channels", "dead channels disappear from lists", { store.hideDead }) { store.hideDead = it; applyFilter() }
         toggle("Skip dead channels automatically", "jump to the next channel when one fails", { store.autoSkip }) { store.autoSkip = it }
         row("Sleep timer", if (sleepAt > 0) "Stops in ${((sleepAt - System.currentTimeMillis()) / 60_000).coerceAtLeast(1)} min" else "Off") { showSleepTimer() }
@@ -1783,7 +1790,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         }
         bufferingSince = 0L
         reconnectPending = false
-        player.setMediaSource(Streams.source(ch))
+        applyQuality()
+        player.setMediaSource(Streams.source(ch, if (store.playbackMode == "standard" && !autoLowered) 20_000L else 45_000L))
         player.prepare()
         player.playWhenReady = true
     }
@@ -1861,7 +1869,41 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private var bufferingSince = 0L     // when the current stall started (0 = not stalled)
     private val maxReconnects = 6
     private var reconnectPending = false
-    private var soundOffFor: String? = null  // channel playing without sound after a sound error
+    private var soundOffFor: String? = null
+
+    // ---- buffering & quality
+    private var autoLowered = false            // quality lowered for this session after repeated buffering
+    private val rebuffers = ArrayList<Long>()
+
+    private fun playbackModeLabel() = when (store.playbackMode) {
+        "smooth" -> "Smooth — max 720p, plays 45 s behind live for fewer pauses (tap to change)"
+        "saver" -> "Data saver — max 480p, best on slow internet or a VPN (tap to change)"
+        else -> "Standard — best picture, plays 20 s behind live (tap to change)"
+    }
+
+    /** Caps the picture size for Smooth / Data saver, or after repeated buffering. */
+    private fun applyQuality() {
+        val b = player.trackSelectionParameters.buildUpon()
+        when {
+            store.playbackMode == "saver" -> b.setMaxVideoSize(854, 480)
+            store.playbackMode == "smooth" || autoLowered -> b.setMaxVideoSize(1280, 720)
+            else -> b.clearVideoSizeConstraints()
+        }
+        player.trackSelectionParameters = b.build()
+    }
+
+    /** Three stalls within three minutes: lower the quality for the rest of this session. */
+    private fun noteRebuffer() {
+        val now = System.currentTimeMillis()
+        rebuffers.add(now)
+        rebuffers.removeAll { now - it > 180_000L }
+        if (rebuffers.size >= 3 && store.playbackMode == "standard" && !autoLowered) {
+            autoLowered = true
+            rebuffers.clear()
+            applyQuality()
+            toast("Buffering a lot — lowered the picture to 720p to keep it smooth")
+        }
+    }  // channel playing without sound after a sound error
 
     /** A live stream that stopped, stalled or dropped: reload it at the live edge. */
     private fun reconnect(why: String) {
@@ -1894,6 +1936,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         override fun onPlaybackStateChanged(state: Int) {
             loading.visibility = if (state == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
             bufferingSince = if (state == Player.STATE_BUFFERING) System.currentTimeMillis() else 0L
+            if (state == Player.STATE_BUFFERING && playedOk) noteRebuffer()
             when (state) {
                 Player.STATE_READY -> {
                     overlay.visibility = View.GONE

@@ -14,7 +14,11 @@ object Streams {
     const val UA =
         "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
 
-    fun source(url: String, userAgent: String?, referrer: String?): MediaSource {
+    /**
+     * [liveOffsetMs] is how far behind "live" to play. Sitting a little behind gives the player
+     * room to ride out short network hiccups instead of stopping to buffer.
+     */
+    fun source(url: String, userAgent: String?, referrer: String?, liveOffsetMs: Long = 20_000L): MediaSource {
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent(userAgent ?: UA)
             .setAllowCrossProtocolRedirects(true)
@@ -22,12 +26,17 @@ object Streams {
             .setReadTimeoutMs(15_000)
         if (referrer != null) http.setDefaultRequestProperties(mapOf("Referer" to referrer))
 
-        val item = MediaItem.Builder().setUri(url).apply {
+        val live = MediaItem.LiveConfiguration.Builder()
+            .setTargetOffsetMs(liveOffsetMs)
+            .setMinPlaybackSpeed(0.97f)
+            .setMaxPlaybackSpeed(1.03f)
+            .build()
+        val item = MediaItem.Builder().setUri(url).setLiveConfiguration(live).apply {
             if (url.contains(".m3u8", ignoreCase = true)) setMimeType(MimeTypes.APPLICATION_M3U8)
             else if (url.contains(".mpd", ignoreCase = true)) setMimeType(MimeTypes.APPLICATION_MPD)
         }.build()
         return DefaultMediaSourceFactory(http).createMediaSource(item)
     }
 
-    fun source(ch: Channel): MediaSource = source(ch.url, ch.userAgent, ch.referrer)
+    fun source(ch: Channel, liveOffsetMs: Long = 20_000L): MediaSource = source(ch.url, ch.userAgent, ch.referrer, liveOffsetMs)
 }
