@@ -232,6 +232,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         } else "⏾ Sleep timer"
         val actions = listOf<Pair<String, () -> Unit>>(
             "📺 TV guide — this channel" to { current?.let { showGuide(it) } ?: toast("Play a channel first") },
+            "🔁 Find another source for this channel" to { current?.let { findAnotherSource(it) } ?: toast("Play a channel first") },
             "⇄ Last channel" to { lastChannel() },
             "▦ Multi-view (watch up to 4)" to { pickMultiView() },
             sleepLabel to { showSleepTimer() },
@@ -1178,6 +1179,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         val actions = ArrayList<Pair<String, () -> Unit>>()
         actions.add((if (ch.url in store.favs) "☆ Remove from favourites" else "★ Add to favourites") to { toggleFav(ch) })
         actions.add("📺 TV guide" to { showGuide(ch) })
+        actions.add("🔁 Find another source" to { findAnotherSource(ch) })
         actions.add("✎ Rename" to { renameChannel(ch) })
         if (inFavView && ch.url in store.favs) {
             actions.add("↑ Move up" to { store.moveFav(ch.url, -1); applyFilter() })
@@ -1547,7 +1549,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                 }
                 if (text != null) {
                     guides.addAll(M3u.guideUrls(text))
-                    for (c in M3u.parse(text)) all.putIfAbsent(c.url, c)
+                    for (c in M3u.parse(text)) if (c.url !in all) all[c.url] = c
                 }
             }
             val everything = all.values.toList()
@@ -1789,6 +1791,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         loading.visibility = View.VISIBLE
         playedOk = false
         reconnects = 0
+        rebuffers.clear()
+        findViewById<View>(R.id.slowBar).visibility = View.GONE
         statStalls = 0
         statDropped = 0
         showBanner(ch)
@@ -1949,7 +1953,98 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             applyQuality()
             toast("Buffering a lot — lowered the picture to 720p to keep it smooth")
         }
+        checkSlowServer()
     }  // channel playing without sound after a sound error
+
+    // ---- Slow-server warning and "Find another source"
+
+    private var slowWarnedFor: String? = null
+    private val hideSlowBar = Runnable { findViewById<View>(R.id.slowBar).visibility = View.GONE }
+
+    /** After a stall: is the channel's server the bottleneck (and there's no lower quality to drop to)? */
+    private fun checkSlowServer() {
+        val ch = current ?: return
+        if (slowWarnedFor == ch.url || rebuffers.size < 2) return
+        val bitrate = player.videoFormat?.bitrate ?: return
+        if (bitrate <= 0) return
+        val speed = androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(this).bitrateEstimate
+        if (speed > bitrate * 1.15) return // video is arriving fast enough; not a slow server
+        val lowerQuality = player.currentTracks.groups.any { g ->
+            g.type == C.TRACK_TYPE_VIDEO && (0 until g.length).any { i ->
+                val br = g.getTrackFormat(i).bitrate
+                br in 1 until (bitrate * 0.8).toInt()
+            }
+        }
+        if (lowerQuality && !autoLowered) return // the app can still step down the quality
+        slowWarnedFor = ch.url
+        val bar = findViewById<TextView>(R.id.slowBar)
+        fun mbps(b: Long) = String.format(java.util.Locale.US, "%.1f", b / 1_000_000.0)
+        bar.text = "⚠  ${ch.name}'s server is slow — it sends ${mbps(speed)} Mbps but needs ${mbps(bitrate.toLong())}. " +
+            "Your internet is fine.   Find another source ▸"
+        bar.visibility = View.VISIBLE
+        bar.setOnClickListener { bar.visibility = View.GONE; findAnotherSource(ch) }
+        if (fullscreen || isTv()) bar.requestFocus()
+        handler.removeCallbacks(hideSlowBar)
+        handler.postDelayed(hideSlowBar, 20_000)
+    }
+
+    private fun altKey(name: String) = Epg.nameKey(name).removePrefix("name:")
+
+    /** Looks through every built-in list (and yours) for the same channel from a different stream. */
+    private fun findAnotherSource(ch: Channel) {
+        val key = altKey(ch.name)
+        if (key.length < 3) { toast("This channel's name is too short to search for"); return }
+        toast("Looking for other sources of ${ch.name}…")
+        // Label each list link with a service name rather than a mix name
+        val labels = LinkedHashMap<String, String>()
+        (Sources.all().filter { it.section != Sources.START } + store.customSources() + Sources.all())
+            .forEach { src -> src.urls.forEach { u -> if (u !in labels) labels[u] = src.name } }
+        io.execute {
+            val found = LinkedHashMap<String, Pair<Channel, String>>()
+            for ((url, label) in labels) {
+                val f = cacheFile(url)
+                val text = try {
+                    if (f.exists() && System.currentTimeMillis() - f.lastModified() < 24 * 3600_000L) f.readText()
+                    else download(url).also { f.writeText(it) }
+                } catch (e: Exception) { null } ?: continue
+                for (c in M3u.parse(text)) {
+                    if (c.url == ch.url || c.url in found) continue
+                    val k = altKey(c.name)
+                    val match = k == key || (k.length >= 4 && key.length >= 4 && (k.startsWith(key) || key.startsWith(k)))
+                    if (!match) continue
+                    if (store.englishOnly && !Lang.isEnglish(c)) continue
+                    if (store.health(c.url) == false) continue
+                    found[c.url] = c to label
+                }
+                if (found.size >= 25) break
+            }
+            runOnUiThread { showAlternatives(ch, found.values.toList()) }
+        }
+    }
+
+    private fun showAlternatives(ch: Channel, alts: List<Pair<Channel, String>>) {
+        if (isFinishing) return
+        if (alts.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("No other sources found")
+                .setMessage("None of your channel lists has another stream of ${ch.name}. Try a similar channel instead.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        // Streams already known to work come first
+        val sorted = alts.sortedByDescending { store.health(it.first.url) == true }
+        val labels = sorted.map { (c, from) -> (if (store.health(c.url) == true) "✓ " else "") + "${c.name}  —  $from" }
+        AlertDialog.Builder(this)
+            .setTitle("Other sources for ${ch.name}")
+            .setItems(labels.toTypedArray()) { _, i ->
+                val alt = sorted[i].first
+                slowWarnedFor = null
+                watch(alt)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
 
     /** A live stream that stopped, stalled or dropped: reload it at the live edge. */
     private fun reconnect(why: String) {
