@@ -201,12 +201,23 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
         backCallback = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() {
-                if (fullscreen) setFullscreen(false) else showSection(Section.HOME)
+                when {
+                    surfVisible() -> hideSurf()
+                    fullscreen -> {
+                        setFullscreen(false)
+                        // Came from the guide: go back to it
+                        if (returnToGuide) { returnToGuide = false; showSection(Section.GUIDE) }
+                    }
+                    else -> showSection(Section.HOME)
+                }
             }
         }
         onBackPressedDispatcher.addCallback(this, backCallback)
 
         setupShell()
+        setupSurf()
+        applyPictureMode()
+        playerView.setShowSubtitleButton(true)
         if (store.takeMixSwitch() && store.welcomed) {
             handler.postDelayed({ toast("New: the Canada mix — English channels from Pluto TV, Samsung TV Plus, Plex and more") }, 1500)
         }
@@ -233,6 +244,10 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         val actions = listOf<Pair<String, () -> Unit>>(
             "📺 TV guide — this channel" to { current?.let { showGuide(it) } ?: toast("Play a channel first") },
             "🔁 Find another source for this channel" to { current?.let { findAnotherSource(it) } ?: toast("Play a channel first") },
+            "💬 Subtitles" to { showTrackPicker(C.TRACK_TYPE_TEXT) },
+            "🔊 Audio track" to { showTrackPicker(C.TRACK_TYPE_AUDIO) },
+            "🖼 Picture: ${store.pictureMode.replaceFirstChar { it.uppercase() }} (change)" to { cyclePictureMode() },
+            "⏰ Reminders" to { showReminders() },
             "⇄ Last channel" to { lastChannel() },
             "▦ Multi-view (watch up to 4)" to { pickMultiView() },
             sleepLabel to { showSleepTimer() },
@@ -335,7 +350,10 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         setupSearch()
         navMovies.setOnClickListener { showSection(Section.MOVIES) }
         navHome.setOnClickListener { showSection(Section.HOME) }
-        navLive.setOnClickListener { showSection(Section.LIVE) }
+        navLive.setOnClickListener { showSection(if (store.liveView == "guide") Section.GUIDE else Section.LIVE) }
+        findViewById<View>(R.id.toListView).setOnClickListener { store.liveView = "list"; showSection(Section.LIVE) }
+        findViewById<View>(R.id.toGuideView).setOnClickListener { store.liveView = "guide"; showSection(Section.GUIDE) }
+        findViewById<View>(R.id.micBtn).setOnClickListener { startVoiceSearch() }
         navGuide.setOnClickListener { showSection(Section.GUIDE) }
         navSettings.setOnClickListener { showSection(Section.SETTINGS) }
 
@@ -415,7 +433,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     }
 
     private fun updateBack() {
-        if (::backCallback.isInitialized) backCallback.isEnabled = fullscreen || section != Section.HOME
+        if (::backCallback.isInitialized) backCallback.isEnabled = fullscreen || section != Section.HOME || surfVisible()
     }
 
     // ---- Search
@@ -680,7 +698,9 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         guideView.visibility = if (s == Section.GUIDE) View.VISIBLE else View.GONE
         moviesList.visibility = if (s == Section.MOVIES) View.VISIBLE else View.GONE
         settingsView.visibility = if (s == Section.SETTINGS) View.VISIBLE else View.GONE
-        navItems.forEachIndexed { i, v -> v.isSelected = i == s.ordinal }
+        // The guide is part of Live TV now, so Live TV stays highlighted for both views
+        navItems.forEachIndexed { i, v -> v.isSelected = i == s.ordinal || (s == Section.GUIDE && i == Section.LIVE.ordinal) }
+        if (s != Section.LIVE) findViewById<View>(R.id.surfPanel).visibility = View.GONE
 
         val prevShowsVideo = prev == Section.LIVE || prev == Section.GUIDE
         val showsVideo = s == Section.LIVE || s == Section.GUIDE
@@ -716,6 +736,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             return
         }
         val alreadyPlaying = ch.url == current?.url && player.playbackState != Player.STATE_IDLE
+        returnToGuide = section == Section.GUIDE
         if (section != Section.LIVE) showSection(Section.LIVE, resume = false)
         if (alreadyPlaying) {
             store.lastUrl = ch.url
@@ -896,7 +917,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         AlertDialog.Builder(this)
             .setTitle(prog.title)
             .setMessage("${ch.name}\n${hhmm(prog.start)} – ${hhmm(prog.stop)}" + if (prog.desc.isNotEmpty()) "\n\n${prog.desc}" else "")
-            .setPositiveButton("Watch ${ch.name} now") { _, _ -> watch(ch) }
+            .setPositiveButton("⏰ Remind me") { _, _ -> addReminder(ch, prog) }
+            .setNeutralButton("Watch ${ch.name} now") { _, _ -> watch(ch) }
             .setNegativeButton("Close", null)
             .show()
     }
@@ -1082,6 +1104,14 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         }
         toggle("Hide offline channels", "dead channels disappear from lists", { store.hideDead }) { store.hideDead = it; applyFilter() }
         toggle("Skip dead channels automatically", "jump to the next channel when one fails", { store.autoSkip }) { store.autoSkip = it }
+        row("Picture fit", "Now: ${store.pictureMode.replaceFirstChar { it.uppercase() }} — tap to switch Fit / Fill / Zoom") { sv ->
+            cyclePictureMode(); sv.text = "Now: ${store.pictureMode.replaceFirstChar { it.uppercase() }} — tap to switch Fit / Fill / Zoom"
+        }
+        row("Reminders", "${store.reminders().size} set — shows you asked to be reminded about") { showReminders() }
+        row("Live TV opens as", if (store.liveView == "guide") "TV guide (tap for the simple list)" else "Simple list (tap for the TV guide)") { sv ->
+            store.liveView = if (store.liveView == "guide") "list" else "guide"
+            sv.text = if (store.liveView == "guide") "TV guide (tap for the simple list)" else "Simple list (tap for the TV guide)"
+        }
         row("Sleep timer", if (sleepAt > 0) "Stops in ${((sleepAt - System.currentTimeMillis()) / 60_000).coerceAtLeast(1)} min" else "Off") { showSleepTimer() }
 
         toggle("Show connection info", "internet speed, picture quality and buffer on the video — helps find buffering causes", { store.showStats }) {
@@ -1830,6 +1860,165 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         player.playWhenReady = true
     }
 
+    // ---- Channel surfing over full-screen video
+
+    private lateinit var surfAdapter: ChannelAdapter
+
+    private fun setupSurf() {
+        val list = findViewById<RecyclerView>(R.id.surfList)
+        surfAdapter = ChannelAdapter(
+            store,
+            nowShowing = { ch -> epg.now(ch)?.let { "Now: ${it.title}" } },
+            isLocked = { ch -> isLockedGroup(ch) },
+            onClick = { ch -> hideSurf(); play(ch, auto = false) },
+            onToggleFav = { ch -> toggleFav(ch) },
+            onOptions = { ch -> showChannelOptions(ch) },
+        )
+        list.layoutManager = LinearLayoutManager(this)
+        list.adapter = surfAdapter
+    }
+
+    private fun surfVisible() = findViewById<View>(R.id.surfPanel).visibility == View.VISIBLE
+
+    private fun showSurf() {
+        if (filtered.isEmpty()) return
+        val list = findViewById<RecyclerView>(R.id.surfList)
+        findViewById<TextView>(R.id.surfTitle).text =
+            "📺 " + (sources.firstOrNull { it.id == loadedSourceId }?.name?.substringBefore(" —") ?: "Channels")
+        surfAdapter.submit(filtered, current?.url)
+        findViewById<View>(R.id.surfPanel).visibility = View.VISIBLE
+        playerView.hideController()
+        val pos = filtered.indexOfFirst { it.url == current?.url }.coerceAtLeast(0)
+        (list.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(pos, 200)
+        list.post { list.findViewHolderForAdapterPosition(pos)?.itemView?.requestFocus() ?: list.getChildAt(0)?.requestFocus() }
+        updateBack()
+    }
+
+    private fun hideSurf() {
+        findViewById<View>(R.id.surfPanel).visibility = View.GONE
+        playerView.requestFocus()
+        updateBack()
+    }
+
+    // ---- Reminders
+
+    private val reminderTick = object : Runnable {
+        override fun run() {
+            checkReminders()
+            handler.postDelayed(this, 30_000)
+        }
+    }
+
+    private fun addReminder(ch: Channel, prog: Epg.Prog) {
+        store.addReminder(ch, prog.title, prog.start)
+        toast("⏰ Reminder set: ${prog.title} at ${hhmm(prog.start)}")
+    }
+
+    private fun checkReminders() {
+        val due = store.dueReminders(System.currentTimeMillis()) ?: return
+        val ch = byUrl[due.url] ?: Channel(due.name, due.url, due.logo, due.group, null, null)
+        AlertDialog.Builder(this)
+            .setTitle("⏰ Starting now")
+            .setMessage("${due.title}\non ${due.name}")
+            .setPositiveButton("Watch") { _, _ -> watch(ch) }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    private fun showReminders() {
+        val list = store.reminders()
+        if (list.isEmpty()) {
+            toast("No reminders. In the guide, pick a show that hasn't started and choose Remind me.")
+            return
+        }
+        val labels = list.map { r -> "${hhmm(r.start)}  ${r.title}  —  ${r.name}" }
+        AlertDialog.Builder(this)
+            .setTitle("Reminders (tap one to delete it)")
+            .setItems(labels.toTypedArray()) { _, i ->
+                store.removeReminder(list[i])
+                toast("Reminder deleted")
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    // ---- Subtitles, audio tracks and picture fit
+
+    private fun trackLabel(f: androidx.media3.common.Format, n: Int): String {
+        val lang = f.language?.let { java.util.Locale(it).displayLanguage }?.takeIf { it.isNotBlank() && it != "und" }
+        return listOfNotNull(f.label, lang).distinct().joinToString(" · ").ifEmpty { "Track $n" }
+    }
+
+    private fun showTrackPicker(type: Int) {
+        val groups = player.currentTracks.groups.filter { it.type == type }
+        val options = ArrayList<Pair<String, (() -> Unit)>>()
+        if (type == C.TRACK_TYPE_TEXT) {
+            options.add("Off" to {
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+            })
+        }
+        var n = 0
+        for (g in groups) for (i in 0 until g.length) {
+            if (!g.isTrackSupported(i)) continue
+            n++
+            val label = trackLabel(g.getTrackFormat(i), n) + if (g.isTrackSelected(i)) "  ✓" else ""
+            options.add(label to {
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(type, false)
+                    .setOverrideForType(androidx.media3.common.TrackSelectionOverride(g.mediaTrackGroup, i))
+                    .build()
+            })
+        }
+        val what = if (type == C.TRACK_TYPE_TEXT) "subtitles" else "other audio tracks"
+        if (n == 0) { toast("This channel doesn't offer $what"); return }
+        AlertDialog.Builder(this)
+            .setTitle(if (type == C.TRACK_TYPE_TEXT) "💬 Subtitles" else "🔊 Audio track")
+            .setItems(options.map { it.first }.toTypedArray()) { _, i -> options[i].second() }
+            .show()
+    }
+
+    private fun applyPictureMode() {
+        playerView.resizeMode = when (store.pictureMode) {
+            "fill" -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL
+            "zoom" -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            else -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+    }
+
+    private fun cyclePictureMode() {
+        store.pictureMode = when (store.pictureMode) { "fit" -> "fill"; "fill" -> "zoom"; else -> "fit" }
+        applyPictureMode()
+        toast(when (store.pictureMode) {
+            "fill" -> "Picture: Fill screen (stretches to remove black bars)"
+            "zoom" -> "Picture: Zoom (fills the screen, trims the edges)"
+            else -> "Picture: Fit (whole picture, may show black bars)"
+        })
+    }
+
+    // ---- Voice search
+
+    private val voiceLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val text = res.data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        if (res.resultCode == Activity.RESULT_OK && !text.isNullOrBlank()) {
+            if (section != Section.SEARCH) showSection(Section.SEARCH)
+            searchBox.setText(text)
+            searchBox.setSelection(text.length)
+        }
+    }
+
+    private fun startVoiceSearch() {
+        if (section != Section.SEARCH) showSection(Section.SEARCH)
+        val intent = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Say a channel, show or movie")
+        try {
+            voiceLauncher.launch(intent)
+        } catch (e: Exception) {
+            toast("Voice search isn't available on this device — use the keyboard's mic instead")
+        }
+    }
+
     // ---- channels that live in another app, or need their stream looked up first
 
     private fun opensElsewhere(ch: Channel) = ch.url.startsWith("app:") || ch.url.startsWith("ytsearch:")
@@ -1960,6 +2149,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private val maxReconnects = 6
     private var reconnectPending = false
     private var soundOffFor: String? = null
+    private var returnToGuide = false
 
     // ---- connection info box
     private var statDropped = 0
@@ -2406,8 +2596,12 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                 !typing && code in KeyEvent.KEYCODE_NUMPAD_0..KeyEvent.KEYCODE_NUMPAD_9 -> {
                     typeDigit(code - KeyEvent.KEYCODE_NUMPAD_0); return true
                 }
+                code == KeyEvent.KEYCODE_SEARCH || code == KeyEvent.KEYCODE_VOICE_ASSIST -> { startVoiceSearch(); return true }
+                code == KeyEvent.KEYCODE_DPAD_LEFT && fullscreen && !surfVisible() && !playerView.isControllerFullyVisible -> {
+                    showSurf(); return true
+                }
                 (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN) &&
-                    fullscreen && !playerView.isControllerFullyVisible -> {
+                    fullscreen && !surfVisible() && !playerView.isControllerFullyVisible -> {
                     step(if (code == KeyEvent.KEYCODE_DPAD_UP) -1 else 1)
                     return true
                 }
@@ -2424,6 +2618,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         handler.postDelayed(watchdog, 5_000)
         handler.removeCallbacks(minuteTick)
         handler.postDelayed(minuteTick, 60_000)
+        handler.removeCallbacks(reminderTick)
+        handler.postDelayed(reminderTick, 5_000)
         updateStats()
         // Coming back to the app: jump to the live edge instead of resuming stale video
         if (section == Section.LIVE || section == Section.GUIDE) current?.let { reconnects = 0; startSource(it) }

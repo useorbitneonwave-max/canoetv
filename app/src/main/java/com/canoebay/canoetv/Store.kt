@@ -228,6 +228,57 @@ class Store(context: Context) {
         get() = p.getBoolean("showStats", false)
         set(v) = p.edit().putBoolean("showStats", v).apply()
 
+    /** Live TV opens as the guide ("guide") or the simple channel list ("list"). */
+    var liveView: String
+        get() = p.getString("liveView", "guide") ?: "guide"
+        set(v) = p.edit().putString("liveView", v).apply()
+
+    /** "fit", "fill" or "zoom" */
+    var pictureMode: String
+        get() = p.getString("pictureMode", "fit") ?: "fit"
+        set(v) = p.edit().putString("pictureMode", v).apply()
+
+    // ---- reminders for shows that haven't started yet
+    data class Reminder(val url: String, val name: String, val logo: String, val group: String, val title: String, val start: Long)
+
+    fun reminders(): List<Reminder> {
+        val a = try { JSONArray(p.getString("reminders", "[]")) } catch (e: Exception) { JSONArray() }
+        return (0 until a.length()).map { a.getJSONObject(it) }.map {
+            Reminder(it.optString("url"), it.optString("name"), it.optString("logo"), it.optString("group"),
+                it.optString("title"), it.optLong("start"))
+        }.sortedBy { it.start }
+    }
+
+    private fun saveReminders(list: List<Reminder>) {
+        val a = JSONArray()
+        list.forEach { r ->
+            a.put(JSONObject().put("url", r.url).put("name", r.name).put("logo", r.logo).put("group", r.group)
+                .put("title", r.title).put("start", r.start))
+        }
+        p.edit().putString("reminders", a.toString()).apply()
+    }
+
+    fun addReminder(ch: Channel, title: String, start: Long) {
+        val list = reminders().filterNot { it.url == ch.url && it.start == start } +
+            Reminder(ch.url, ch.name, ch.logo, ch.group, title, start)
+        saveReminders(list)
+    }
+
+    fun removeReminder(r: Reminder) = saveReminders(reminders().filterNot { it == r })
+
+    /** The next reminder that's starting (from a minute before to 10 minutes after); it's removed once returned. */
+    fun dueReminders(now: Long): Reminder? {
+        val list = reminders()
+        val due = list.firstOrNull { now >= it.start - 60_000L && now <= it.start + 10 * 60_000L } ?: run {
+            // Drop reminders that were missed long ago
+            val stale = list.filter { now > it.start + 10 * 60_000L }
+            if (stale.isNotEmpty()) saveReminders(list - stale.toSet())
+            return null
+        }
+        saveReminders(list - due)
+        return due
+    }
+
     var welcomed: Boolean
         get() = p.getBoolean("welcomed", false)
         set(v) = p.edit().putBoolean("welcomed", v).apply()
