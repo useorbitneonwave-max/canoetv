@@ -40,7 +40,10 @@ class Epg(private val dir: File) {
 
     private val data = ConcurrentHashMap<String, List<Prog>>()
     private val attempted = ConcurrentHashMap<String, Long>()
-    private val pool = Executors.newSingleThreadExecutor()
+    // Low-priority thread, so reading big guide files never slows down the video
+    private val pool = Executors.newSingleThreadExecutor { r ->
+        Thread({ android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LOWEST); r.run() }, "guide")
+    }
     private val fmt = SimpleDateFormat("yyyyMMddHHmmss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
 
     /** Guide entries for a channel: matched by its guide ID first, then by its name. */

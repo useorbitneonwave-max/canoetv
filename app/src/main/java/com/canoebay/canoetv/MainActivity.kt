@@ -127,7 +127,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private var unlocked = false // parental lock opened with the PIN this session
 
     private val handler = Handler(Looper.getMainLooper())
-    private val io = Executors.newSingleThreadExecutor()
+    private val io = Executors.newSingleThreadExecutor(lowPriority("lists"))
     private val skipRunnable = Runnable { step(1, auto = true) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1109,7 +1109,9 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             .sortedByDescending { it.value }.forEach { countries.add(it.key) }
 
         val urls = ArrayList<String>()
-        for (cc in countries.take(7)) {
+        // Lists like Pluto, Samsung and Plex bring their own guides, so fewer big country files are needed
+        val maxCountries = if (guideCatalog.any { !it.contains("epgshare01") }) 2 else 4
+        for (cc in countries.take(maxCountries)) {
             val code = cc.uppercase(java.util.Locale.ROOT)
             urls.add(guideCatalog.firstOrNull { it.contains("_${code}1.xml") }
                 ?: "https://epgshare01.online/epgshare01/epg_ripper_${code}1.xml.gz")
@@ -1690,11 +1692,15 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     // ------------------------------------------------------------------ background channel check
 
     @Volatile private var checkGen = 0
-    private val checkPool = Executors.newFixedThreadPool(6)
+    private val checkPool = Executors.newFixedThreadPool(3, lowPriority("check"))
+
+    /** True while video is playing: background work waits so it doesn't cause buffering. */
+    @Volatile private var videoBusy = false
     private val checkRunnable = Runnable { startBackgroundCheck() }
 
     /** Tests the channels in the current list that haven't been tested in the last 24h. */
     private fun startBackgroundCheck() {
+        if (videoBusy) return // tested later, when nothing is playing
         val gen = ++checkGen
         val todo = filtered.filter { store.health(it.url) == null && it.url != current?.url }.take(400)
         if (todo.isEmpty()) return
@@ -1703,7 +1709,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         val working = AtomicInteger()
         val pending = ConcurrentHashMap<String, Boolean>()
         for (c in todo) checkPool.execute {
-            if (gen != checkGen) return@execute
+            if (gen != checkGen || videoBusy) return@execute
             val ok = probe(c)
             pending[c.url] = ok
             if (ok) working.incrementAndGet()
@@ -1953,6 +1959,9 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            videoBusy = isPlaying
+            if (isPlaying) checkGen++ // stop any channel testing that's running
+            else { handler.removeCallbacks(checkRunnable); handler.postDelayed(checkRunnable, 20_000) }
             if (isPlaying) { overlay.visibility = View.GONE; if (section == Section.GUIDE) showPreviewMsg(null) }
         }
 
@@ -2236,6 +2245,11 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         moviePool.shutdownNow()
         epg.shutdown()
         super.onDestroy()
+    }
+
+    /** Threads for background work run at low priority so playback always comes first. */
+    private fun lowPriority(name: String) = java.util.concurrent.ThreadFactory { r ->
+        Thread({ android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND); r.run() }, name)
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
