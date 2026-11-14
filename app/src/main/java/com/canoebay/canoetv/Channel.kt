@@ -8,36 +8,107 @@ data class Channel(
     val userAgent: String?,
     val referrer: String?,
     val tvgId: String = "",
+    val country: String = "",  // two-letter country code, lower case ("" if unknown)
+    val lang: String = "",     // tvg-language, if the playlist gives one
 ) {
     var number: Int = 0
 }
 
 /** A playlist the app can load. A source may combine several M3U links. */
-data class Source(val id: String, val name: String, val urls: List<String>, val custom: Boolean = false)
+data class Source(
+    val id: String,
+    val name: String,
+    val urls: List<String>,
+    val custom: Boolean = false,
+    val section: String = "Your playlists",
+)
 
 object Sources {
     const val FREE_TV = "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8"
     private const val IPTV_ORG = "https://iptv-org.github.io/iptv"
+    private const val PLUTO = "https://raw.githubusercontent.com/BuddyChewChew/pluto/main"
+    private const val FAST = "https://raw.githubusercontent.com/BuddyChewChew/app-m3u-generator/main/playlists"
+    private const val XUMO = "https://raw.githubusercontent.com/BuddyChewChew/xumo-playlist-generator/main/playlists/xumo_playlist.m3u"
 
-    /** Built in for everyone: a curated list of channels that are free to watch. */
-    fun core(): List<Source> = listOf(
-        Source("freetv", "Free-TV — free, curated channels", listOf(FREE_TV)),
+    const val START = "Start here"
+    const val SERVICES = "Free TV services"
+    const val WORLD = "Worldwide"
+    const val COUNTRY = "By country"
+    const val TOPIC = "By topic"
+    val sectionOrder = listOf(START, SERVICES, WORLD, COUNTRY, TOPIC, "Your playlists")
+
+    /** Every built-in list, in the order shown in the list picker. */
+    fun all(): List<Source> = listOf(
+        // Start here: one list with the best English channels for where you are
+        Source("canada_mix", "Canada mix — best English channels",
+            listOf("$PLUTO/pluto_ca.m3u", "$FAST/samsungtvplus_ca.m3u", "$FAST/plex_ca.m3u", FREE_TV), section = START),
+        Source("usa_mix", "USA mix (works best in the US)",
+            listOf("$PLUTO/pluto_us.m3u", "$FAST/samsungtvplus_us.m3u", "$FAST/plex_us.m3u", "$FAST/roku_all.m3u",
+                "$FAST/tubi_all.m3u", XUMO), section = START),
+        Source("uk_mix", "UK mix (works best in the UK)",
+            listOf("$PLUTO/pluto_gb.m3u", "$FAST/samsungtvplus_gb.m3u", "$FAST/plex_gb.m3u"), section = START),
+
+        // Free TV services
+        Source("pluto_ca", "Pluto TV — Canada", listOf("$PLUTO/pluto_ca.m3u"), section = SERVICES),
+        Source("pluto_us", "Pluto TV — USA", listOf("$PLUTO/pluto_us.m3u"), section = SERVICES),
+        Source("pluto_gb", "Pluto TV — UK", listOf("$PLUTO/pluto_gb.m3u"), section = SERVICES),
+        Source("samsung_ca", "Samsung TV Plus — Canada", listOf("$FAST/samsungtvplus_ca.m3u"), section = SERVICES),
+        Source("samsung_us", "Samsung TV Plus — USA", listOf("$FAST/samsungtvplus_us.m3u"), section = SERVICES),
+        Source("samsung_gb", "Samsung TV Plus — UK", listOf("$FAST/samsungtvplus_gb.m3u"), section = SERVICES),
+        Source("plex_ca", "Plex — Canada", listOf("$FAST/plex_ca.m3u"), section = SERVICES),
+        Source("plex_us", "Plex — USA", listOf("$FAST/plex_us.m3u"), section = SERVICES),
+        Source("plex_gb", "Plex — UK", listOf("$FAST/plex_gb.m3u"), section = SERVICES),
+        Source("roku", "The Roku Channel (USA)", listOf("$FAST/roku_all.m3u"), section = SERVICES),
+        Source("tubi", "Tubi", listOf("$FAST/tubi_all.m3u"), section = SERVICES),
+        Source("xumo", "Xumo", listOf(XUMO), section = SERVICES),
+
+        // Worldwide
+        Source("all", "All free channels (Free-TV + iptv-org)", listOf(FREE_TV, "$IPTV_ORG/index.m3u"), section = WORLD),
+        Source("freetv", "Free-TV — curated channels", listOf(FREE_TV), section = WORLD),
+        Source("iptvorg", "iptv-org — every country", listOf("$IPTV_ORG/index.m3u"), section = WORLD),
+
+        // By country
+        Source("ca", "Canada", listOf("$IPTV_ORG/countries/ca.m3u"), section = COUNTRY),
+        Source("tt", "Trinidad & Tobago", listOf("$IPTV_ORG/countries/tt.m3u"), section = COUNTRY),
+        Source("us", "USA", listOf("$IPTV_ORG/countries/us.m3u"), section = COUNTRY),
+        Source("uk", "United Kingdom", listOf("$IPTV_ORG/countries/uk.m3u"), section = COUNTRY),
+
+        // By topic
+        Source("news", "News", listOf("$IPTV_ORG/categories/news.m3u"), section = TOPIC),
+        Source("sports", "Sports", listOf("$IPTV_ORG/categories/sports.m3u"), section = TOPIC),
+        Source("movies", "Movies", listOf("$IPTV_ORG/categories/movies.m3u"), section = TOPIC),
+        Source("kids", "Kids", listOf("$IPTV_ORG/categories/kids.m3u"), section = TOPIC),
+        Source("music", "Music", listOf("$IPTV_ORG/categories/music.m3u"), section = TOPIC),
+    )
+}
+
+/** Decides whether a channel is in English, from the clues the playlists give. */
+object Lang {
+    private val english = setOf(
+        "us", "ca", "uk", "gb", "ie", "au", "nz", "tt", "jm", "bb", "bs", "gy", "bz", "ag", "lc", "gd", "vc",
+        "kn", "dm", "bm", "ky", "vg", "vi", "pr", "mt", "za", "ng", "gh", "ke", "sg", "ph", "int",
     )
 
-    /** Community lists from iptv-org, all built in. */
-    fun extras(): List<Source> = listOf(
-        Source("all", "All free channels (Free-TV + iptv-org)", listOf(FREE_TV, "$IPTV_ORG/index.m3u")),
-        Source("iptvorg", "iptv-org — every country", listOf("$IPTV_ORG/index.m3u")),
-        Source("ca", "Canada", listOf("$IPTV_ORG/countries/ca.m3u")),
-        Source("tt", "Trinidad & Tobago", listOf("$IPTV_ORG/countries/tt.m3u")),
-        Source("us", "USA", listOf("$IPTV_ORG/countries/us.m3u")),
-        Source("uk", "United Kingdom", listOf("$IPTV_ORG/countries/uk.m3u")),
-        Source("news", "News", listOf("$IPTV_ORG/categories/news.m3u")),
-        Source("sports", "Sports", listOf("$IPTV_ORG/categories/sports.m3u")),
-        Source("movies", "Movies", listOf("$IPTV_ORG/categories/movies.m3u")),
-        Source("kids", "Kids", listOf("$IPTV_ORG/categories/kids.m3u")),
-        Source("music", "Music", listOf("$IPTV_ORG/categories/music.m3u")),
+    // Words in a channel's name or category that point to another language
+    private val foreign = Regex(
+        "(?i)\\b(bollywood|hindi|punjabi|tamil|telugu|malayalam|marathi|kannada|gujarati|bengali|bangla|urdu|" +
+            "arabic|persian|farsi|turk|türk|español|espanol|spanish|latino|latina|en español|portugu|brasil|" +
+            "fran[cç]ais|french|qu[ée]bec|télé|deutsch|german|italia|polsk|polish|czech|česk|russian|" +
+            "русск|ukrain|greek|ελλ|dutch|nederland|svensk|swedish|norsk|danish|dansk|suomi|finnish|romania|" +
+            "magyar|hungar|korean|chinese|japanese|vietnam|thai|indonesia|filipino|tagalog|hebrew|kurd)"
     )
+
+    // Writing systems other than Latin (Cyrillic, Greek, Arabic, Hebrew, Indian scripts, Thai, CJK, Korean)
+    private val nonLatin = Regex("[\\u0370-\\u03FF\\u0400-\\u04FF\\u0590-\\u06FF\\u0900-\\u0DFF\\u0E00-\\u0E7F\\u3040-\\u30FF\\u3400-\\u9FFF\\uAC00-\\uD7AF]")
+
+    fun isEnglish(c: Channel): Boolean {
+        if (c.lang.isNotBlank()) return c.lang.contains("english", ignoreCase = true) || c.lang.equals("en", ignoreCase = true)
+        if (c.group.contains("(EN)")) return true
+        if (nonLatin.containsMatchIn(c.name)) return false
+        if (foreign.containsMatchIn(c.name) || foreign.containsMatchIn(c.group)) return false
+        if (c.country.isNotEmpty()) return c.country in english
+        return true
+    }
 }
 
 object M3u {
@@ -61,6 +132,8 @@ object M3u {
         var ua: String? = null
         var ref: String? = null
         var tvg = ""
+        var country = ""
+        var lang = ""
 
         for (raw in text.lineSequence()) {
             val line = raw.trim()
@@ -77,6 +150,12 @@ object M3u {
                     ua = attrs["http-user-agent"] ?: attrs["user-agent"]
                     ref = attrs["http-referrer"] ?: attrs["referrer"]
                     tvg = attrs["tvg-id"] ?: ""
+                    lang = attrs["tvg-language"] ?: ""
+                    country = (attrs["tvg-country"] ?: "").split(';', ',', ' ').firstOrNull { it.isNotBlank() }?.lowercase() ?: ""
+                    if (country.isEmpty()) {
+                        val suffix = tvg.substringBefore('@').substringAfterLast('.', "").lowercase()
+                        if (suffix.length == 2 && suffix.all { it.isLetter() }) country = suffix
+                    }
                     pending = true
                 }
                 line.startsWith("#EXTGRP:", ignoreCase = true) -> {
@@ -95,11 +174,11 @@ object M3u {
                 line.startsWith("#") -> Unit
                 else -> {
                     if (pending) {
-                        out.add(Channel(name, line, logo, group, ua, ref, tvg))
+                        out.add(Channel(name, line, logo, group, ua, ref, tvg, country, lang))
                     } else {
                         out.add(Channel(line.substringAfterLast('/').ifEmpty { "Stream" }, line, "", "Uncategorized", null, null))
                     }
-                    pending = false; name = ""; logo = ""; group = "Uncategorized"; ua = null; ref = null; tvg = ""
+                    pending = false; name = ""; logo = ""; group = "Uncategorized"; ua = null; ref = null; tvg = ""; country = ""; lang = ""
                 }
             }
         }

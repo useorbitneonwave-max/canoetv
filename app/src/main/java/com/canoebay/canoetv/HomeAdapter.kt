@@ -15,6 +15,7 @@ import coil.load
 sealed class HomeItem {
     data class Hero(val ch: Channel, val label: String) : HomeItem()
     data class Row(val title: String, val channels: List<Channel>) : HomeItem()
+    data class Apps(val title: String, val apps: List<AppEntry>) : HomeItem()
 }
 
 /** What the Home and Guide screens need from the main screen. */
@@ -28,6 +29,8 @@ interface TvHost {
     fun toggleFav(ch: Channel)
     fun openGuide()
     fun hhmm(t: Long): String
+    fun appIcon(app: AppEntry): android.graphics.drawable.Drawable?
+    fun openApp(app: AppEntry)
 }
 
 object Look {
@@ -73,7 +76,11 @@ class HomeAdapter(private val host: TvHost) : RecyclerView.Adapter<RecyclerView.
     }
 
     override fun getItemCount() = items.size
-    override fun getItemViewType(position: Int) = if (items[position] is HomeItem.Hero) 0 else 1
+    override fun getItemViewType(position: Int) = when (items[position]) {
+        is HomeItem.Hero -> 0
+        is HomeItem.Row -> 1
+        is HomeItem.Apps -> 2
+    }
 
     class HeroVH(v: View) : RecyclerView.ViewHolder(v) {
         val logo: ImageView = v.findViewById(R.id.heroLogo)
@@ -93,6 +100,13 @@ class HomeAdapter(private val host: TvHost) : RecyclerView.Adapter<RecyclerView.
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         val inf = LayoutInflater.from(parent.context)
+        if (viewType == 2) {
+            return RowVH(inf.inflate(R.layout.item_home_row, parent, false)).also { vh ->
+                vh.list.layoutManager = LinearLayoutManager(parent.context, LinearLayoutManager.HORIZONTAL, false)
+                vh.list.adapter = AppCardAdapter(host)
+                vh.list.itemAnimator = null
+            }
+        }
         return if (viewType == 0) {
             HeroVH(inf.inflate(R.layout.item_hero, parent, false))
         } else {
@@ -113,6 +127,11 @@ class HomeAdapter(private val host: TvHost) : RecyclerView.Adapter<RecyclerView.
                 h.title.text = item.title
                 (h.list.adapter as CardAdapter).submit(item.channels)
                 h.list.scrollToPosition(0)
+            }
+            is HomeItem.Apps -> {
+                val h = holder as RowVH
+                h.title.text = item.title
+                (h.list.adapter as AppCardAdapter).submit(item.apps)
             }
         }
     }
@@ -210,5 +229,47 @@ class CardAdapter(private val host: TvHost) : RecyclerView.Adapter<CardAdapter.V
         h.badge.visibility = if (now != null) View.VISIBLE else View.GONE
         h.itemView.setOnClickListener { host.open(ch) }
         h.itemView.setOnLongClickListener { host.options(ch); true }
+    }
+}
+
+/** Cards for the My apps row: your installed streaming apps first, then ones you can get. */
+class AppCardAdapter(private val host: TvHost) : RecyclerView.Adapter<CardAdapter.VH>() {
+
+    private var items: List<AppEntry> = emptyList()
+
+    fun submit(list: List<AppEntry>) {
+        items = list
+        notifyDataSetChanged()
+    }
+
+    override fun getItemCount() = items.size
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): CardAdapter.VH {
+        val v = LayoutInflater.from(parent.context).inflate(R.layout.item_card, parent, false)
+        Look.focusZoom(v)
+        return CardAdapter.VH(v)
+    }
+
+    override fun onBindViewHolder(h: CardAdapter.VH, position: Int) {
+        val app = items[position]
+        val radius = 10 * h.itemView.resources.displayMetrics.density
+        h.tile.background = Look.tile(app.color, radius)
+        val icon = host.appIcon(app)
+        if (icon != null) {
+            h.initials.visibility = View.GONE
+            h.logo.visibility = View.VISIBLE
+            h.logo.setImageDrawable(icon)
+        } else {
+            h.logo.visibility = View.GONE
+            h.initials.text = app.name
+            h.initials.textSize = 18f
+            h.initials.visibility = View.VISIBLE
+        }
+        h.badge.visibility = View.GONE
+        h.progress.visibility = View.INVISIBLE
+        h.name.text = app.name
+        h.show.text = if (icon != null) "Open" else "Get the app"
+        h.itemView.setOnClickListener { host.openApp(app) }
+        h.itemView.setOnLongClickListener(null)
     }
 }

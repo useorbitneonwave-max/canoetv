@@ -158,7 +158,7 @@ class Store(context: Context) {
         set(v) = p.edit().putString("lastUrl", v).apply()
 
     var sourceId: String
-        get() = p.getString("sourceId", "all") ?: "all"
+        get() = p.getString("sourceId", "canada_mix") ?: "canada_mix"
         set(v) = p.edit().putString("sourceId", v).apply()
 
     var hideDead: Boolean
@@ -198,6 +198,17 @@ class Store(context: Context) {
             keys.forEach { health.remove(it) }
         }
         p.edit().putString("health", health.toString()).apply()
+    }
+
+    var englishOnly: Boolean
+        get() = p.getBoolean("englishOnly", true)
+        set(v) = p.edit().putBoolean("englishOnly", v).apply()
+
+    /** One-time move to the new Canada mix when updating to 1.4. */
+    fun takeMixSwitch(): Boolean {
+        if (p.getBoolean("mixSwitch14", false)) return false
+        p.edit().putBoolean("mixSwitch14", true).putString("sourceId", "canada_mix").apply()
+        return true
     }
 
     var welcomed: Boolean

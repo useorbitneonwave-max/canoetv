@@ -83,6 +83,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private lateinit var bannerSub: TextView
     private lateinit var nowPlaying: TextView
     private lateinit var sourceSpinner: Spinner
+    private lateinit var sourceBtn: TextView
     private lateinit var groupSpinner: Spinner
     private lateinit var search: EditText
     private lateinit var shell: LinearLayout
@@ -144,6 +145,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         bannerSub = findViewById(R.id.bannerSub)
         nowPlaying = findViewById(R.id.nowPlaying)
         sourceSpinner = findViewById(R.id.sourceSpinner)
+        sourceBtn = findViewById(R.id.sourceBtn)
+        sourceBtn.setOnClickListener { showListPicker() }
         groupSpinner = findViewById(R.id.groupSpinner)
         search = findViewById(R.id.search)
         status = findViewById(R.id.status)
@@ -197,6 +200,9 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         onBackPressedDispatcher.addCallback(this, backCallback)
 
         setupShell()
+        if (store.takeMixSwitch() && store.welcomed) {
+            handler.postDelayed({ toast("New: the Canada mix — English channels from Pluto TV, Samsung TV Plus, Plex and more") }, 1500)
+        }
         setupSources(selectId = store.sourceId)
         applyLayout()
         showSection(Section.HOME)
@@ -510,19 +516,9 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     }
 
     private fun chooseStartList() {
-        val picks = sources.filter { !it.custom }
-        AlertDialog.Builder(this)
-            .setTitle("Which channels do you want first?")
-            .setItems(picks.map { it.name }.toTypedArray()) { _, i ->
-                store.welcomed = true
-                if (picks[i].id != loadedSourceId) {
-                    sourceSpinner.setSelection(sources.indexOfFirst { it.id == picks[i].id }.coerceAtLeast(0), false)
-                    load(picks[i])
-                }
-                toast("You can change this any time at the top of Live TV")
-            }
-            .setOnCancelListener { store.welcomed = true }
-            .show()
+        store.welcomed = true
+        toast("Canada mix is ready. You can switch lists any time.")
+        showListPicker()
     }
 
     // ---- Android TV home-screen row and canoetv:// links
@@ -760,6 +756,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         }
 
         fun row(title: String, list: List<Channel>) { if (list.isNotEmpty()) items.add(HomeItem.Row(title, list)) }
+        items.add(HomeItem.Apps("My apps", myAppsInOrder()))
         row("Continue watching", store.recents.mapNotNull { byUrl[it] }.filter { it.url != heroCh?.url }.take(15))
         row("My List", store.favOrder.mapNotNull { byUrl[it] })
         row(ROW_ON_NOW, visible.filter { epg.now(it) != null }.take(40))
@@ -905,6 +902,11 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         }
 
         header("Channels")
+        row("Channel list", sources.firstOrNull { it.id == loadedSourceId }?.name ?: "Choose") { showListPicker() }
+        toggle("English channels only", "hides Bollywood, European and other foreign-language channels", { store.englishOnly }) {
+            store.englishOnly = it
+            loadedSourceId?.let { id -> loadedSourceId = null; current = null; setupSources(id) }
+        }
         row("Add your own playlist", "An M3U link from a provider you subscribe to") { showAddDialog() }
         row("Remove one of your playlists", "${store.customSources().size} added") { showRemoveDialog() }
         row("Show / hide categories", "${store.hiddenGroups.size} hidden") { showHideCategories() }
@@ -960,7 +962,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                 ?: "https://epgshare01.online/epgshare01/epg_ripper_${code}1.xml.gz")
         }
         // Guides a custom playlist names itself (not the big shared list)
-        urls.addAll(guideCatalog.filter { !it.contains("epgshare01") }.take(2))
+        urls.addAll(guideCatalog.filter { !it.contains("epgshare01") }.take(8))
         if (urls.isEmpty()) return
         epg.load(urls, ids, names, ::downloadToFile) {
             runOnUiThread {
@@ -1256,21 +1258,108 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     // ------------------------------------------------------------------ sources & loading
 
     private fun setupSources(selectId: String) {
-        sources = Sources.extras().take(1) + Sources.core() + Sources.extras().drop(1) + store.customSources()
-        val labels = sources.map { if (it.custom) "📁 ${it.name}" else it.name }
-        sourceSpinner.adapter = ArrayAdapter(this, R.layout.spinner_item, labels).also {
-            it.setDropDownViewResource(R.layout.spinner_item)
-        }
-        val idx = sources.indexOfFirst { it.id == selectId }.let { if (it < 0) 0 else it }
-        sourceSpinner.setSelection(idx, false)
-        sourceSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                if (pos in sources.indices && sources[pos].id != loadedSourceId) load(sources[pos])
-            }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
-        }
-        if (loadedSourceId != sources[idx].id) load(sources[idx])
+        sources = Sources.all() + store.customSources()
+        val src = sources.firstOrNull { it.id == selectId } ?: sources.first()
+        if (loadedSourceId != src.id) load(src)
+        updateSourceButton()
     }
+
+    // ---- Channel-list picker (organised in sections)
+
+    private fun sourceLabel(src: Source) = (if (src.custom) "📁 " else "") + src.name
+
+    private fun updateSourceButton() {
+        val src = sources.firstOrNull { it.id == loadedSourceId }
+        sourceBtn.text = "📺  " + (src?.let { sourceLabel(it) } ?: "Choose a channel list") + "   ▾"
+    }
+
+    private fun showListPicker() {
+        val entries = ArrayList<Any>()
+        for (section in Sources.sectionOrder) {
+            val inSection = sources.filter { it.section == section }
+            if (inSection.isEmpty()) continue
+            entries.add(section)
+            entries.addAll(inSection)
+        }
+        entries.add("More")
+        entries.add("+ Add your own playlist (M3U link)")
+        val dens = resources.displayMetrics.density
+        fun dp(v: Int) = (v * dens).toInt()
+
+        val listAdapter = object : android.widget.BaseAdapter() {
+            override fun getCount() = entries.size
+            override fun getItem(position: Int) = entries[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getViewTypeCount() = 2
+            override fun getItemViewType(position: Int) = if (isHeader(position)) 0 else 1
+            override fun areAllItemsEnabled() = false
+            override fun isEnabled(position: Int) = !isHeader(position)
+            fun isHeader(position: Int): Boolean {
+                val e = entries[position]
+                return e is String && !e.startsWith("+")
+            }
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+                val tv = (convertView as? TextView) ?: TextView(this@MainActivity)
+                val e = entries[position]
+                if (isHeader(position)) {
+                    tv.text = (e as String).uppercase()
+                    tv.textSize = 12f
+                    tv.letterSpacing = 0.1f
+                    tv.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.accent))
+                    tv.setTypeface(null, android.graphics.Typeface.BOLD)
+                    tv.setPadding(dp(20), dp(16), dp(20), dp(6))
+                    tv.background = null
+                } else {
+                    val selected = e is Source && e.id == loadedSourceId
+                    tv.text = when (e) {
+                        is Source -> (if (selected) "✓  " else "     ") + sourceLabel(e)
+                        else -> "     $e"
+                    }
+                    tv.textSize = 16f
+                    tv.setTextColor(if (selected) ContextCompat.getColor(this@MainActivity, R.color.accent) else 0xFFFFFFFF.toInt())
+                    tv.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                    tv.setPadding(dp(20), dp(12), dp(20), dp(12))
+                    tv.background = ContextCompat.getDrawable(this@MainActivity, R.drawable.row_bg)
+                }
+                return tv
+            }
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Channel lists")
+            .setAdapter(listAdapter) { _, i ->
+                val e = entries[i]
+                if (e is Source) chooseSource(e)
+                else if (e is String && e.startsWith("+")) showAddDialog()
+            }
+            .setNegativeButton("Close", null)
+            .create()
+        dialog.show()
+        // Start the list at the current choice
+        val at = entries.indexOfFirst { it is Source && it.id == loadedSourceId }
+        if (at > 0) dialog.listView?.setSelection(at)
+    }
+
+    private fun chooseSource(src: Source) {
+        if (src.id == loadedSourceId) return
+        current = null
+        setupSources(selectId = src.id)
+        toast("Loading ${src.name}…")
+    }
+
+    // ---- My apps
+
+    override fun appIcon(app: AppEntry) = MyApps.icon(this, app)
+
+    override fun openApp(app: AppEntry) {
+        try {
+            MyApps.open(this, app, isTv())?.let { toast(it) }
+        } catch (e: Exception) {
+            toast("Couldn't open ${app.name}")
+        }
+    }
+
+    private fun myAppsInOrder(): List<AppEntry> =
+        MyApps.all.sortedByDescending { MyApps.installed(this, it) != null }
 
     private fun load(src: Source) {
         val token = ++loadToken
@@ -1294,14 +1383,19 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                     for (c in M3u.parse(text)) all.putIfAbsent(c.url, c)
                 }
             }
-            val result = all.values.toList()
+            val everything = all.values.toList()
+            val result = if (store.englishOnly) everything.filter { Lang.isEnglish(it) } else everything
+            val hiddenForeign = everything.size - result.size
             result.forEachIndexed { i, c ->
                 c.number = i + 1
                 store.renamed(c.url)?.let { c.name = it }
             }
             runOnUiThread {
                 if (token != loadToken) return@runOnUiThread
+                guideCatalog.clear()
                 guideCatalog.addAll(guides)
+                updateSourceButton()
+                if (hiddenForeign > 0) status.text = "${result.size} channels · $hiddenForeign other-language channels hidden"
                 channels = result
                 byUrl = result.associateBy { it.url }
                 store.sourceId = src.id
