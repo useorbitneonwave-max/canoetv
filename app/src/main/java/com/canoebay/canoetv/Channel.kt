@@ -21,6 +21,7 @@ data class Source(
     val urls: List<String>,
     val custom: Boolean = false,
     val section: String = "Your playlists",
+    val country: String? = null, // keep only channels from this country (lower-case code)
 )
 
 object Sources {
@@ -31,6 +32,18 @@ object Sources {
     private const val XUMO = "https://raw.githubusercontent.com/BuddyChewChew/xumo-playlist-generator/main/playlists/xumo_playlist.m3u"
 
     const val START = "Start here"
+
+    /** Built-in entries for the main T&T stations, using their official live streams and apps. */
+    const val TT_BUILTIN = "builtin:tt"
+    val ttBuiltin = """
+        #EXTM3U
+        #EXTINF:-1 tvg-id="CNC3.tt" tvg-country="TT" tvg-logo="https://i.imgur.com/1E73l2j.png" group-title="Trinidad & Tobago",CNC3 — official live stream
+        dailymotion:x9vba4u
+        #EXTINF:-1 tvg-id="TV6.tt" tvg-country="TT" group-title="Trinidad & Tobago",TV6 — opens the TV6 app
+        app:com.tv6.android.prod
+        #EXTINF:-1 tvg-id="TTT.tt" tvg-country="TT" tvg-logo="https://i.imgur.com/rxf4x8J.jpg" group-title="Trinidad & Tobago",TTT — opens YouTube (TTT Live Online)
+        ytsearch:TTT Live Online live
+    """.trimIndent()
     const val SERVICES = "Free TV services"
     const val WORLD = "Worldwide"
     const val COUNTRY = "By country"
@@ -47,6 +60,10 @@ object Sources {
                 "$FAST/tubi_all.m3u", XUMO), section = START),
         Source("uk_mix", "UK mix (works best in the UK)",
             listOf("$PLUTO/pluto_gb.m3u", "$FAST/samsungtvplus_gb.m3u", "$FAST/plex_gb.m3u"), section = START),
+
+        Source("tt_all", "🇹🇹 Trinidad & Tobago — CNC3, TTT, TV6 & more",
+            listOf(TT_BUILTIN, "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/tt.m3u", FREE_TV),
+            section = START, country = "tt"),
 
         // Free TV services
         Source("pluto_ca", "Pluto TV — Canada", listOf("$PLUTO/pluto_ca.m3u"), section = SERVICES),

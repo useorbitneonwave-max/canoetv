@@ -710,6 +710,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     /** Opens a channel full screen from anywhere in the app. */
     private fun watch(ch: Channel) {
+        if (opensElsewhere(ch)) { openElsewhere(ch); return }
         if (needsPin(ch)) {
             askPin("Enter your PIN to watch ${ch.name}") { unlocked = true; adapter.notifyDataSetChanged(); watch(ch) }
             return
@@ -925,6 +926,11 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         if (needsPin(ch)) {
             player.stop()
             showPreviewMsg("🔒 Locked — press OK to enter your PIN")
+            return
+        }
+        if (opensElsewhere(ch)) {
+            player.stop()
+            showPreviewMsg("Press OK to open ${ch.name.substringAfter("— ").ifEmpty { "it" }}")
             return
         }
         if (ch.url == current?.url && player.playbackState != Player.STATE_IDLE) return
@@ -1541,7 +1547,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             val guides = ArrayList<String>()
             var failed = 0
             for (u in src.urls) {
-                val text = try {
+                val text = if (u == Sources.TT_BUILTIN) Sources.ttBuiltin else try {
                     download(u).also { cacheFile(u).writeText(it) }
                 } catch (e: Exception) {
                     failed++
@@ -1553,7 +1559,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                 }
             }
             val everything = all.values.toList()
-            val result = if (store.englishOnly) everything.filter { Lang.isEnglish(it) } else everything
+            val inCountry = src.country?.let { cc -> everything.filter { it.country == cc } } ?: everything
+            val result = if (store.englishOnly) inCountry.filter { Lang.isEnglish(it) } else inCountry
             val hiddenForeign = everything.size - result.size
             result.forEachIndexed { i, c ->
                 c.number = i + 1
@@ -1716,7 +1723,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private fun startBackgroundCheck() {
         if (videoBusy) return // tested later, when nothing is playing
         val gen = ++checkGen
-        val todo = filtered.filter { store.health(it.url) == null && it.url != current?.url }.take(400)
+        val todo = filtered.filter { it.url.startsWith("http") && store.health(it.url) == null && it.url != current?.url }.take(400)
         if (todo.isEmpty()) return
         val total = todo.size
         val done = AtomicInteger()
@@ -1773,6 +1780,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     // ------------------------------------------------------------------ playback
 
     private fun play(ch: Channel, auto: Boolean) {
+        if (opensElsewhere(ch)) { if (!auto) openElsewhere(ch); return }
         if (needsPin(ch)) {
             if (auto) return
             askPin("Enter your PIN to watch ${ch.name}") { unlocked = true; adapter.notifyDataSetChanged(); play(ch, auto = false) }
@@ -1815,9 +1823,67 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         bufferingSince = 0L
         reconnectPending = false
         applyQuality()
-        player.setMediaSource(Streams.source(ch, if (store.playbackMode == "standard" && !autoLowered) 20_000L else 45_000L))
+        val offset = if (store.playbackMode == "standard" && !autoLowered) 20_000L else 45_000L
+        if (ch.url.startsWith("dailymotion:")) { startDailymotion(ch, offset); return }
+        player.setMediaSource(Streams.source(ch, offset))
         player.prepare()
         player.playWhenReady = true
+    }
+
+    // ---- channels that live in another app, or need their stream looked up first
+
+    private fun opensElsewhere(ch: Channel) = ch.url.startsWith("app:") || ch.url.startsWith("ytsearch:")
+
+    private fun openElsewhere(ch: Channel) {
+        try {
+            if (ch.url.startsWith("app:")) {
+                val pkg = ch.url.removePrefix("app:")
+                val app = MyApps.all.firstOrNull { pkg in it.packages } ?: AppEntry(ch.name, 0, pkg, pkg)
+                MyApps.open(this, app, isTv())?.let { toast(it) }
+            } else {
+                val q = Uri.encode(ch.url.removePrefix("ytsearch:"))
+                val web = Uri.parse("https://www.youtube.com/results?search_query=$q")
+                val yt = Intent(Intent.ACTION_VIEW, web).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // Prefer the YouTube app (TV or phone); otherwise any browser
+                val pkg = listOf("com.google.android.youtube.tv", "com.amazon.firetv.youtube", "com.google.android.youtube")
+                    .firstOrNull { p -> try { packageManager.getPackageInfo(p, 0); true } catch (e: Exception) { false } }
+                if (pkg != null) yt.setPackage(pkg)
+                startActivity(yt)
+            }
+        } catch (e: Exception) {
+            toast("Couldn't open ${ch.name}")
+        }
+    }
+
+    private val dmCache = HashMap<String, Pair<String, Long>>()
+
+    /** CNC3 streams live on Dailymotion: look up the current stream address, then play it. */
+    private fun startDailymotion(ch: Channel, offset: Long) {
+        val id = ch.url.removePrefix("dailymotion:")
+        val cached = dmCache[id]?.takeIf { System.currentTimeMillis() - it.second < 20 * 60_000L }?.first
+        if (cached != null) {
+            player.setMediaSource(Streams.source(cached, ch.userAgent, "https://www.dailymotion.com/", offset))
+            player.prepare(); player.playWhenReady = true
+            return
+        }
+        moviePool.execute {
+            val url = try {
+                val meta = JSONObject(download("https://www.dailymotion.com/player/metadata/video/$id"))
+                meta.optJSONObject("qualities")?.optJSONArray("auto")?.optJSONObject(0)?.optString("url")?.takeIf { it.startsWith("http") }
+            } catch (e: Exception) { null }
+            runOnUiThread {
+                if (current?.url != ch.url) return@runOnUiThread
+                if (url == null) {
+                    showMessage("${ch.name} isn't streaming right now. Try again later, or open the CNC3 app.", error = true)
+                    if (section == Section.GUIDE) showPreviewMsg("CNC3 isn't streaming right now")
+                    loading.visibility = View.GONE
+                    return@runOnUiThread
+                }
+                dmCache[id] = url to System.currentTimeMillis()
+                player.setMediaSource(Streams.source(url, ch.userAgent, "https://www.dailymotion.com/", offset))
+                player.prepare(); player.playWhenReady = true
+            }
+        }
     }
 
     private fun lastChannel() {

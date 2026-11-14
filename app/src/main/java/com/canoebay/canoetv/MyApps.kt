@@ -29,6 +29,7 @@ object MyApps {
         AppEntry("Plex", 0xFF4A3A1A.toInt(), "com.plexapp.android", "com.plexapp.android"),
         AppEntry("Paramount+", 0xFF1A2A6A.toInt(), "com.cbs.app", "com.cbs.ott"),
         AppEntry("DAZN", 0xFF2A2A2A.toInt(), "com.dazn", "com.dazn"),
+        AppEntry("TV6 (T&T)", 0xFF1A2A5A.toInt(), "com.tv6.android.prod", "com.tv6.android.prod"),
         AppEntry("CBC Gem", 0xFF5A1A1A.toInt(), "ca.cbc.android.cbctv", "ca.cbc.android.cbctv"),
     )
 

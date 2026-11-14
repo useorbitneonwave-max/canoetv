@@ -31,6 +31,7 @@
         <package android:name="com.cbs.ott" />
         <package android:name="com.dazn" />
         <package android:name="ca.cbc.android.cbctv" />
+        <package android:name="com.tv6.android.prod" />
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="market" />
