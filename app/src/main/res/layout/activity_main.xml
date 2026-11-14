@@ -31,6 +31,7 @@
             android:textStyle="bold" />
 
         <TextView android:id="@+id/navHome" style="@style/NavItem" android:text="🏠   Home" />
+        <TextView android:id="@+id/navSearch" style="@style/NavItem" android:text="🔍   Search" />
         <TextView android:id="@+id/navLive" style="@style/NavItem" android:text="📺   Live TV" />
         <TextView android:id="@+id/navMovies" style="@style/NavItem" android:text="🎬   Movies" />
         <TextView android:id="@+id/navGuide" style="@style/NavItem" android:text="🗓   TV Guide" />
@@ -50,6 +51,63 @@
             android:layout_height="match_parent"
             android:clipToPadding="false"
             android:paddingBottom="24dp" />
+
+        <TextView
+            android:id="@+id/homeEmpty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:padding="32dp"
+            android:text="Loading channels…"
+            android:textColor="@color/muted"
+            android:textSize="16sp"
+            android:visibility="gone" />
+
+        <!-- SEARCH -->
+        <LinearLayout
+            android:id="@+id/searchView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:paddingTop="16dp"
+            android:visibility="gone">
+
+            <EditText
+                android:id="@+id/searchBox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="24dp"
+                android:layout_marginEnd="24dp"
+                android:background="@drawable/settings_row_bg"
+                android:hint="🔍  Search channels, shows and movies"
+                android:imeOptions="actionSearch"
+                android:importantForAutofill="no"
+                android:inputType="text"
+                android:padding="14dp"
+                android:singleLine="true"
+                android:textColor="#FFFFFF"
+                android:textColorHint="@color/muted"
+                android:textSize="17sp" />
+
+            <TextView
+                android:id="@+id/searchHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="28dp"
+                android:paddingTop="10dp"
+                android:paddingEnd="28dp"
+                android:text="Type at least 2 letters. Search looks through channel names, categories, what's on in the TV guide, and free movies."
+                android:textColor="@color/muted"
+                android:textSize="13sp" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/searchList"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clipToPadding="false"
+                android:paddingBottom="24dp" />
+        </LinearLayout>
 
         <!-- MOVIES -->
         <androidx.recyclerview.widget.RecyclerView

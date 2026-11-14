@@ -45,7 +45,10 @@ object MovieCatalog {
             "&sort%5B%5D=${e("downloads desc")}&rows=$rows&page=1&output=json"
     }
 
-    fun searchByTitleUrl(text: String): String = searchUrl("title:(${text.replace("\"", "")})", 40)
+    fun searchByTitleUrl(text: String): String {
+        val words = text.replace(Regex("[^\\p{L}\\p{N} ]"), " ").trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        return searchUrl("title:(" + words.joinToString(" AND ") + ")", 40)
+    }
 
     private val tags = Regex("<[^>]*>")
     private val spaces = Regex("\\s+")

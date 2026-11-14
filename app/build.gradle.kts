@@ -14,7 +14,7 @@ android {
         minSdk = 21
         targetSdk = 34
         versionCode = buildNumber
-        versionName = "1.2.$buildNumber"
+        versionName = "1.3.$buildNumber"
         // The GitHub repo this app updates itself from
         val repo = System.getenv("GITHUB_REPOSITORY") ?: "useorbitneonwave-max/canoetv"
         buildConfigField("String", "REPO", "\"$repo\"")
@@ -66,4 +66,5 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-dash:$media3")
     implementation("androidx.media3:media3-ui:$media3")
     implementation("io.coil-kt:coil:2.6.0")
+    implementation("androidx.tvprovider:tvprovider:1.0.0")
 }

@@ -200,6 +200,10 @@ class Store(context: Context) {
         p.edit().putString("health", health.toString()).apply()
     }
 
+    var welcomed: Boolean
+        get() = p.getBoolean("welcomed", false)
+        set(v) = p.edit().putBoolean("welcomed", v).apply()
+
     var lastUpdateCheck: Long
         get() = p.getLong("lastUpdateCheck", 0L)
         set(v) = p.edit().putLong("lastUpdateCheck", v).apply()

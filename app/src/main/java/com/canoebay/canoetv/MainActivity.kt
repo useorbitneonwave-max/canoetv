@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException
 import android.app.PictureInPictureParams
 import android.content.Intent
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -199,6 +200,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         setupSources(selectId = store.sourceId)
         applyLayout()
         showSection(Section.HOME)
+        if (!store.welcomed) handler.postDelayed({ if (!isFinishing) showWelcome() }, 600)
+        handleLink(intent)
 
         // Look for a newer version shortly after start-up (at most twice a day)
         handler.postDelayed({ checkForUpdates(manual = false) }, 8_000)
@@ -281,7 +284,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     // ------------------------------------------------------------------ sections (Home, Live TV, Guide, Settings)
 
-    private enum class Section { HOME, LIVE, MOVIES, GUIDE, SETTINGS }
+    private enum class Section { HOME, SEARCH, LIVE, MOVIES, GUIDE, SETTINGS }
 
     private var section = Section.HOME
     private var homeDirty = true
@@ -308,11 +311,14 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         settingsList = findViewById(R.id.settingsList)
 
         val navHome = findViewById<TextView>(R.id.navHome)
+        val navSearch = findViewById<TextView>(R.id.navSearch)
         val navLive = findViewById<TextView>(R.id.navLive)
         val navMovies = findViewById<TextView>(R.id.navMovies)
         val navGuide = findViewById<TextView>(R.id.navGuide)
         val navSettings = findViewById<TextView>(R.id.navSettings)
-        navItems = listOf(navHome, navLive, navMovies, navGuide, navSettings)
+        navItems = listOf(navHome, navSearch, navLive, navMovies, navGuide, navSettings)
+        navSearch.setOnClickListener { showSection(Section.SEARCH) }
+        setupSearch()
         navMovies.setOnClickListener { showSection(Section.MOVIES) }
         navHome.setOnClickListener { showSection(Section.HOME) }
         navLive.setOnClickListener { showSection(Section.LIVE) }
@@ -356,7 +362,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         val wc = ViewGroup.LayoutParams.WRAP_CONTENT
         val dens = resources.displayMetrics.density
         navBar.visibility = if (fullscreen || inPip) View.GONE else View.VISIBLE
-        val labels = listOf("🏠" to "Home", "📺" to "Live TV", "🎬" to "Movies", "🗓" to "Guide", "⚙" to "Settings")
+        val labels = listOf("🏠" to "Home", "🔍" to "Search", "📺" to "Live TV", "🎬" to "Movies", "🗓" to "Guide", "⚙" to "Settings")
         val bottomBar = !isTv() && resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
         if (bottomBar) {
             shell.orientation = LinearLayout.VERTICAL
@@ -394,6 +400,166 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     private fun updateBack() {
         if (::backCallback.isInitialized) backCallback.isEnabled = fullscreen || section != Section.HOME
+    }
+
+    // ---- Search
+
+    private lateinit var searchBox: EditText
+    private lateinit var searchHint: TextView
+    private lateinit var searchList: RecyclerView
+    private lateinit var searchChannels: HomeAdapter
+    private lateinit var searchMovies: MoviesAdapter
+    private var searchToken = 0
+    private val searchRunnable = Runnable { runSearch(searchBox.text.toString().trim()) }
+
+    private fun setupSearch() {
+        searchBox = findViewById(R.id.searchBox)
+        searchHint = findViewById(R.id.searchHint)
+        searchList = findViewById(R.id.searchList)
+        searchChannels = HomeAdapter(this)
+        searchMovies = MoviesAdapter(this)
+        searchList.layoutManager = LinearLayoutManager(this)
+        searchList.adapter = androidx.recyclerview.widget.ConcatAdapter(searchChannels, searchMovies)
+        searchList.itemAnimator = null
+        searchBox.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                handler.removeCallbacks(searchRunnable)
+                handler.postDelayed(searchRunnable, 350)
+            }
+        })
+        searchBox.setOnEditorActionListener { _, _, _ ->
+            handler.removeCallbacks(searchRunnable)
+            runSearch(searchBox.text.toString().trim())
+            searchList.post { searchList.getChildAt(0)?.requestFocus() }
+            true
+        }
+    }
+
+    private fun runSearch(q: String) {
+        val token = ++searchToken
+        if (q.length < 2) {
+            searchChannels.submit(emptyList())
+            searchMovies.submit(emptyList())
+            searchHint.text = "Type at least 2 letters. Search looks through channel names, categories, what's on in the TV guide, and free movies."
+            return
+        }
+        val visible = channels.filter { it.group !in store.hiddenGroups }
+        val rows = ArrayList<HomeItem>()
+
+        val byName = visible.filter { it.name.contains(q, ignoreCase = true) }
+            .sortedByDescending { it.name.startsWith(q, ignoreCase = true) }
+        if (byName.isNotEmpty()) rows.add(HomeItem.Row("Channels", byName.take(60)))
+
+        val now = System.currentTimeMillis()
+        val airingNow = ArrayList<Channel>()
+        val later = ArrayList<Channel>()
+        for (ch in visible) {
+            val hit = epg.upcoming(ch, 40).firstOrNull { it.title.contains(q, ignoreCase = true) } ?: continue
+            if (hit.start <= now) airingNow.add(ch) else later.add(ch)
+            if (airingNow.size + later.size >= 120) break
+        }
+        if (airingNow.isNotEmpty()) rows.add(HomeItem.Row("“$q” — on now", airingNow))
+        if (later.isNotEmpty()) rows.add(HomeItem.Row("“$q” — coming up (see TV Guide for times)", later))
+
+        visible.map { it.group }.distinct().filter { it.contains(q, ignoreCase = true) }.take(5).forEach { g ->
+            rows.add(HomeItem.Row("Category: $g", visible.filter { it.group == g }.take(40)))
+        }
+
+        searchChannels.submit(rows)
+        searchMovies.submit(emptyList())
+        val chCount = byName.size
+        val showCount = airingNow.size + later.size
+        searchHint.text = if (rows.isEmpty()) "No channels or shows match “$q”. Looking for movies…"
+        else "$chCount channels · $showCount with matching shows. Looking for movies…"
+
+        // Movies come from the internet, so they arrive a moment later
+        moviePool.execute {
+            val found = try {
+                MovieCatalog.parseSearch(download(MovieCatalog.searchByTitleUrl(q)))
+            } catch (e: Exception) { null }
+            runOnUiThread {
+                if (token != searchToken) return@runOnUiThread
+                if (!found.isNullOrEmpty()) searchMovies.submit(listOf(MovieItem.Row("Free movies", found)))
+                searchHint.text = when {
+                    rows.isEmpty() && found.isNullOrEmpty() -> "Nothing matches “$q”. Try a shorter word."
+                    found == null -> "$chCount channels · $showCount with matching shows · movies couldn't be searched right now"
+                    else -> "$chCount channels · $showCount with matching shows · ${found.size} movies"
+                }
+            }
+        }
+    }
+
+    // ---- First-run welcome
+
+    private fun showWelcome() {
+        AlertDialog.Builder(this)
+            .setTitle("Welcome to CanoeTV")
+            .setMessage(
+                "Free live TV from around the world, a TV guide, and free classic movies.\n\n" +
+                    "• Home — what you watched last, your favourites and what's on now\n" +
+                    "• Live TV — every channel, with a list on the side\n" +
+                    "• Movies — free public-domain films\n" +
+                    "• TV Guide — what's on now and next\n\n" +
+                    "Tip: long-press a channel (or hold OK on the remote) to add it to your favourites."
+            )
+            .setCancelable(false)
+            .setPositiveButton("Next") { _, _ -> chooseStartList() }
+            .show()
+    }
+
+    private fun chooseStartList() {
+        val picks = sources.filter { !it.custom }
+        AlertDialog.Builder(this)
+            .setTitle("Which channels do you want first?")
+            .setItems(picks.map { it.name }.toTypedArray()) { _, i ->
+                store.welcomed = true
+                if (picks[i].id != loadedSourceId) {
+                    sourceSpinner.setSelection(sources.indexOfFirst { it.id == picks[i].id }.coerceAtLeast(0), false)
+                    load(picks[i])
+                }
+                toast("You can change this any time at the top of Live TV")
+            }
+            .setOnCancelListener { store.welcomed = true }
+            .show()
+    }
+
+    // ---- Android TV home-screen row and canoetv:// links
+
+    private var pendingPlay: Uri? = null
+    private var tvRowPublished = false
+
+    private fun publishTvRow() {
+        val favs = store.favOrder.mapNotNull { byUrl[it] }
+        Thread { TvHomeRow.publish(applicationContext, favs) { epg.now(it)?.title } }.start()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleLink(intent)
+    }
+
+    private fun handleLink(intent: Intent?) {
+        val uri = intent?.data ?: return
+        if (uri.scheme != "canoetv") return
+        if (uri.host == "play") {
+            pendingPlay = uri
+            playPending()
+        } else {
+            showSection(Section.HOME)
+        }
+    }
+
+    private fun playPending() {
+        val uri = pendingPlay ?: return
+        val url = uri.getQueryParameter("url") ?: return
+        val ch = byUrl[url] ?: if (channels.isEmpty()) return else Channel(
+            uri.getQueryParameter("name") ?: "Channel", url,
+            uri.getQueryParameter("logo") ?: "", uri.getQueryParameter("group") ?: "", null, null,
+        )
+        pendingPlay = null
+        watch(ch)
     }
 
     // ---- Movies (public-domain films from the Internet Archive)
@@ -502,6 +668,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         val prev = section
         section = s
         homeList.visibility = if (s == Section.HOME) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.homeEmpty).visibility = if (s == Section.HOME && channels.isEmpty()) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.searchView).visibility = if (s == Section.SEARCH) View.VISIBLE else View.GONE
         root.visibility = if (s == Section.LIVE) View.VISIBLE else View.GONE
         guideView.visibility = if (s == Section.GUIDE) View.VISIBLE else View.GONE
         moviesList.visibility = if (s == Section.MOVIES) View.VISIBLE else View.GONE
@@ -519,6 +687,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                 if (homeDirty || homeAdapter.itemCount == 0) refreshHome()
                 homeList.post { homeAdapter.focusHero(homeList) }
             }
+            Section.SEARCH -> searchBox.requestFocus()
             Section.LIVE -> list.requestFocus()
             Section.MOVIES -> { loadMovies(); moviesList.post { moviesList.getChildAt(1)?.requestFocus() } }
             Section.GUIDE -> { refreshGuideScreen(); guideList.post { guideList.getChildAt(0)?.requestFocus() } }
@@ -574,6 +743,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     private fun refreshHome() {
         homeDirty = false
+        findViewById<View>(R.id.homeEmpty).visibility =
+            if (section == Section.HOME && channels.isEmpty()) View.VISIBLE else View.GONE
         if (channels.isEmpty()) { homeAdapter.submit(emptyList()); return }
         val visible = channels.filter { it.group !in store.hiddenGroups && store.health(it.url) != false }
         val items = ArrayList<HomeItem>()
@@ -1143,6 +1314,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                 }
                 if (result.isNotEmpty() && current == null) showMessage("Pick a channel to start watching", error = false)
                 refreshSections()
+                playPending()
+                if (!tvRowPublished && result.isNotEmpty()) { tvRowPublished = true; publishTvRow() }
             }
         }
     }
@@ -1263,6 +1436,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         buildGroups()
         if (key == KEY_FAV) applyFilter() else adapter.refresh(ch.url)
         homeDirty = true
+        publishTvRow()
     }
 
     // ------------------------------------------------------------------ background channel check
