@@ -91,7 +91,7 @@ class MultiViewActivity : AppCompatActivity() {
             frame.addView(pv, FrameLayout.LayoutParams(mp, mp))
             frame.addView(label, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
 
-            val player = ExoPlayer.Builder(this).build()
+            val player = Players.build(this)
             pv.player = player
             player.setMediaSource(Streams.source(urls[i], uas.getOrNull(i)?.ifEmpty { null }, refs.getOrNull(i)?.ifEmpty { null }))
             player.prepare()

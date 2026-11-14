@@ -61,7 +61,7 @@ class MovieActivity : AppCompatActivity() {
         root.addView(error, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.CENTER))
         setContentView(root)
 
-        player = ExoPlayer.Builder(this).build()
+        player = Players.build(this)
         pv.player = player
         pv.setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
         player.setMediaItem(MediaItem.fromUri(url))

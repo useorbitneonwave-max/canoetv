@@ -38,6 +38,7 @@ import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -153,13 +154,14 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         list = findViewById(R.id.list)
 
         store = Store(this)
+        store.takeHealthReset15()
         epg = Epg(File(filesDir, "epg").apply { mkdirs() })
 
         // Bigger buffer than the default so short network hiccups don't interrupt playback
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(30_000, 90_000, 2_500, 6_000)
             .build()
-        player = ExoPlayer.Builder(this).setLoadControl(loadControl).build()
+        player = Players.build(this, loadControl)
         player.addListener(playerListener)
         playerView.player = player
         playerView.keepScreenOn = true
@@ -1772,6 +1774,13 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     /** Loads the channel's stream into the player and starts it at the live edge. */
     private fun startSource(ch: Channel) {
+        if (ch.url != soundOffFor) {
+            soundOffFor = null
+            if (player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_AUDIO)) {
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false).build()
+            }
+        }
         bufferingSince = 0L
         reconnectPending = false
         player.setMediaSource(Streams.source(ch))
@@ -1852,6 +1861,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private var bufferingSince = 0L     // when the current stall started (0 = not stalled)
     private val maxReconnects = 6
     private var reconnectPending = false
+    private var soundOffFor: String? = null  // channel playing without sound after a sound error
 
     /** A live stream that stopped, stalled or dropped: reload it at the live edge. */
     private fun reconnect(why: String) {
@@ -1907,6 +1917,22 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             loading.visibility = View.GONE
             val ch = current ?: return
             // A channel that was already playing just dropped out: reconnect instead of giving up
+            val audioProblem = error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
+                error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED
+            if (audioProblem) {
+                // The TV's sound output refused to start — the channel itself is fine. Try again,
+                // and as a last resort play the picture without sound rather than skipping the channel.
+                if (reconnects < 3) { reconnect("starting sound"); return }
+                if (!player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_AUDIO)) {
+                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true).build()
+                    toast("This TV couldn't start the sound for ${ch.name} — playing without sound")
+                    soundOffFor = ch.url
+                    reconnects = 0
+                    startSource(ch)
+                    return
+                }
+            }
             val transient = error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW || playedOk
             if (transient && reconnects < maxReconnects) {
                 reconnect("connection dropped")
@@ -1964,6 +1990,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
             PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED -> "This stream's format isn't supported on this device."
             PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> "The stream fell behind. Pick the channel again."
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+            PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED -> "This TV couldn't start the sound for this channel. Try it again in a moment."
             else -> "The stream couldn't be played — most likely it's offline."
         }
     }

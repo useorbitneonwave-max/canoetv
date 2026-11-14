@@ -211,6 +211,14 @@ class Store(context: Context) {
         return true
     }
 
+    /** One-time clean-up in 1.5.15: forget channels wrongly marked offline by the sound bug. */
+    fun takeHealthReset15(): Boolean {
+        if (p.getBoolean("healthReset15", false)) return false
+        p.edit().putBoolean("healthReset15", true).apply()
+        clearHealth()
+        return true
+    }
+
     var welcomed: Boolean
         get() = p.getBoolean("welcomed", false)
         set(v) = p.edit().putBoolean("welcomed", v).apply()
