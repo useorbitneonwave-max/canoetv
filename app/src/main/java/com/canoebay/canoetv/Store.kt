@@ -44,6 +44,48 @@ class Store(context: Context) {
     }
     fun saveExtras() = p.edit().putStringSet("extras", HashSet(enabledExtras)).apply()
 
+    // ---- movies: My List and where you stopped ----
+    private val moviePos: JSONObject = try { JSONObject(p.getString("moviePos", "{}") ?: "{}") } catch (e: Exception) { JSONObject() }
+    private val myMovies: JSONArray = try { JSONArray(p.getString("myMovies", "[]") ?: "[]") } catch (e: Exception) { JSONArray() }
+
+    fun saveMoviePosition(m: Movie, pos: Long, dur: Long) {
+        // Nearly finished counts as watched
+        if (dur > 0 && pos > dur * 95 / 100) { clearMoviePosition(m.id); return }
+        moviePos.put(m.id, JSONObject().put("pos", pos).put("dur", dur).put("t", System.currentTimeMillis()).put("movie", m.toJson()))
+        p.edit().putString("moviePos", moviePos.toString()).apply()
+    }
+
+    fun clearMoviePosition(id: String) {
+        moviePos.remove(id)
+        p.edit().putString("moviePos", moviePos.toString()).apply()
+    }
+
+    /** Position in ms to resume from, or 0. */
+    fun moviePosition(id: String): Long = moviePos.optJSONObject(id)?.optLong("pos") ?: 0L
+
+    fun movieProgress(id: String): Int {
+        val o = moviePos.optJSONObject(id) ?: return -1
+        val dur = o.optLong("dur")
+        return if (dur > 0) (o.optLong("pos") * 100 / dur).toInt() else -1
+    }
+
+    fun continueMovies(): List<Movie> = moviePos.keys().asSequence()
+        .mapNotNull { moviePos.optJSONObject(it) }
+        .sortedByDescending { it.optLong("t") }
+        .mapNotNull { it.optJSONObject("movie")?.let { m -> Movie.fromJson(m) } }
+        .toList()
+
+    fun myMovieList(): List<Movie> = (0 until myMovies.length()).map { Movie.fromJson(myMovies.getJSONObject(it)) }
+
+    fun isMyMovie(id: String) = (0 until myMovies.length()).any { myMovies.getJSONObject(it).optString("id") == id }
+
+    fun toggleMyMovie(m: Movie): Boolean {
+        val i = (0 until myMovies.length()).firstOrNull { myMovies.getJSONObject(it).optString("id") == m.id }
+        if (i != null) myMovies.remove(i) else myMovies.put(m.toJson())
+        p.edit().putString("myMovies", myMovies.toString()).apply()
+        return i == null
+    }
+
     // ---- renamed channels: url -> custom name ----
     private val renames: JSONObject = try { JSONObject(p.getString("renames", "{}") ?: "{}") } catch (e: Exception) { JSONObject() }
 

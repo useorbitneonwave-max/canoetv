@@ -60,7 +60,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(UnstableApi::class)
-class MainActivity : AppCompatActivity(), TvHost, GuideHost {
+class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     companion object {
         private const val KEY_ALL = "\u0000all"
@@ -163,7 +163,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
 
         adapter = ChannelAdapter(
             store,
-            nowShowing = { ch -> epg.now(ch.tvgId)?.let { "Now: ${it.title}" } },
+            nowShowing = { ch -> epg.now(ch)?.let { "Now: ${it.title}" } },
             isLocked = { ch -> isLockedGroup(ch) },
             onClick = { ch -> if (ch.url == current?.url && player.isPlaying) setFullscreen(true) else play(ch, auto = false) },
             onToggleFav = { ch -> toggleFav(ch) },
@@ -242,6 +242,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
                     "that broadcasters make publicly available, and playlists you add yourself.\n\n" +
                     "Channel lists\n• Free-TV (github.com/Free-TV/IPTV) — built in\n" +
                     "• iptv-org (github.com/iptv-org/iptv) — optional, switched on in Settings\n\n" +
+                    "Movies\n• Public-domain films from the Internet Archive (archive.org)\n\n" +
                     "TV guide data\n• epgshare01.online, and guide links named by your playlists\n\n" +
                     "Made with\n• AndroidX Media3 (Apache 2.0)\n• Coil (Apache 2.0)\n\n" +
                     "If you own a channel and want it removed, please contact the list it comes from.\n\n" +
@@ -261,7 +262,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
                 "CanoeTV has no accounts, no ads and no tracking.\n\n" +
                     "Stored only on this device: your favourites, renamed channels, hidden and locked categories, " +
                     "your PIN, recently watched channels and app settings. Uninstalling the app deletes them.\n\n" +
-                    "Internet requests: CanoeTV downloads channel lists and TV guide files, plays the streams you choose " +
+                    "Internet requests: CanoeTV downloads channel lists, TV guide files and the movie catalogue " +
+                    "(archive.org), plays the streams and films you choose " +
                     "(directly from each channel's server) and checks GitHub for app updates. Those servers see your IP " +
                     "address, as with any website. CanoeTV doesn't send them anything about you.\n\n" +
                     "Full policy: github.com/${BuildConfig.REPO}/blob/main/PRIVACY.md"
@@ -279,7 +281,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
 
     // ------------------------------------------------------------------ sections (Home, Live TV, Guide, Settings)
 
-    private enum class Section { HOME, LIVE, GUIDE, SETTINGS }
+    private enum class Section { HOME, LIVE, MOVIES, GUIDE, SETTINGS }
 
     private var section = Section.HOME
     private var homeDirty = true
@@ -307,13 +309,21 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
 
         val navHome = findViewById<TextView>(R.id.navHome)
         val navLive = findViewById<TextView>(R.id.navLive)
+        val navMovies = findViewById<TextView>(R.id.navMovies)
         val navGuide = findViewById<TextView>(R.id.navGuide)
         val navSettings = findViewById<TextView>(R.id.navSettings)
-        navItems = listOf(navHome, navLive, navGuide, navSettings)
+        navItems = listOf(navHome, navLive, navMovies, navGuide, navSettings)
+        navMovies.setOnClickListener { showSection(Section.MOVIES) }
         navHome.setOnClickListener { showSection(Section.HOME) }
         navLive.setOnClickListener { showSection(Section.LIVE) }
         navGuide.setOnClickListener { showSection(Section.GUIDE) }
         navSettings.setOnClickListener { showSection(Section.SETTINGS) }
+
+        moviesList = findViewById(R.id.moviesList)
+        moviesAdapter = MoviesAdapter(this)
+        moviesList.layoutManager = LinearLayoutManager(this)
+        moviesList.adapter = moviesAdapter
+        moviesList.itemAnimator = null
 
         homeAdapter = HomeAdapter(this)
         homeList.layoutManager = LinearLayoutManager(this)
@@ -346,7 +356,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
         val wc = ViewGroup.LayoutParams.WRAP_CONTENT
         val dens = resources.displayMetrics.density
         navBar.visibility = if (fullscreen || inPip) View.GONE else View.VISIBLE
-        val labels = listOf("🏠" to "Home", "📺" to "Live TV", "🗓" to "Guide", "⚙" to "Settings")
+        val labels = listOf("🏠" to "Home", "📺" to "Live TV", "🎬" to "Movies", "🗓" to "Guide", "⚙" to "Settings")
         val bottomBar = !isTv() && resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
         if (bottomBar) {
             shell.orientation = LinearLayout.VERTICAL
@@ -360,7 +370,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
                 v.layoutParams = LinearLayout.LayoutParams(0, wc, 1f)
                 v.gravity = android.view.Gravity.CENTER
                 v.isSingleLine = false
-                v.textSize = 12f
+                v.textSize = 11f
                 v.text = "${labels[i].first}\n${labels[i].second}"
             }
         } else {
@@ -386,12 +396,115 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
         if (::backCallback.isInitialized) backCallback.isEnabled = fullscreen || section != Section.HOME
     }
 
+    // ---- Movies (public-domain films from the Internet Archive)
+
+    private lateinit var moviesList: RecyclerView
+    private lateinit var moviesAdapter: MoviesAdapter
+    private val movieRows = ConcurrentHashMap<String, List<Movie>>()
+    private val moviePool = Executors.newFixedThreadPool(2)
+    private var moviesRequested = false
+    private val moviesFailed = AtomicInteger()
+
+    private fun loadMovies(force: Boolean = false) {
+        renderMovies()
+        if (moviesRequested && !force) return
+        moviesRequested = true
+        moviesFailed.set(0)
+        for (spec in MovieCatalog.rows) {
+            moviePool.execute {
+                try {
+                    val json = MovieCatalog.cached(cacheDir, MovieCatalog.searchUrl(spec.query), 24 * 3600_000L) { download(it) }
+                    movieRows[spec.title] = MovieCatalog.parseSearch(json)
+                } catch (e: Exception) {
+                    moviesFailed.incrementAndGet()
+                }
+                runOnUiThread { if (section == Section.MOVIES) renderMovies() }
+            }
+        }
+    }
+
+    private fun renderMovies() {
+        if (!::moviesAdapter.isInitialized) return
+        val items = ArrayList<MovieItem>()
+        items.add(MovieItem.Header("🎬  Movies", "Free classic films in the public domain, from the Internet Archive"))
+        store.continueMovies().takeIf { it.isNotEmpty() }?.let { items.add(MovieItem.Row("Continue watching", it)) }
+        store.myMovieList().takeIf { it.isNotEmpty() }?.let { items.add(MovieItem.Row("My List", it)) }
+        var rowsShown = 0
+        for (spec in MovieCatalog.rows) {
+            val list = movieRows[spec.title] ?: continue
+            if (list.size >= 4) { items.add(MovieItem.Row(spec.title, list)); rowsShown++ }
+        }
+        if (rowsShown == 0) {
+            val allFailed = moviesFailed.get() >= MovieCatalog.rows.size
+            items.add(
+                if (allFailed) MovieItem.Header("Couldn't load movies", "Check your internet connection, then open Movies again.")
+                else MovieItem.Header("Loading movies…", "")
+            )
+            if (allFailed) moviesRequested = false
+        }
+        moviesAdapter.submit(items)
+    }
+
+    override fun movieProgress(m: Movie) = store.movieProgress(m.id)
+
+    override fun openMovie(m: Movie) {
+        val dens = resources.displayMetrics.density
+        fun dp(v: Int) = (v * dens).toInt()
+        val box = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(20), dp(12), dp(20), 0) }
+        val poster = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+        poster.load(m.poster)
+        val info = TextView(this).apply {
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text))
+            textSize = 14f
+            maxLines = 12
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            text = listOf(m.year, m.desc.ifEmpty { "No description." }).filter { it.isNotEmpty() }.joinToString("\n\n")
+            setPadding(dp(16), 0, 0, 0)
+        }
+        box.addView(poster, LinearLayout.LayoutParams(dp(120), dp(180)))
+        box.addView(info, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val resumeAt = store.moviePosition(m.id)
+        AlertDialog.Builder(this)
+            .setTitle(m.title)
+            .setView(box)
+            .setPositiveButton(if (resumeAt > 0) "▶ Resume" else "▶ Play") { _, _ -> playMovie(m, resumeAt) }
+            .setNeutralButton(if (store.isMyMovie(m.id)) "✓ My List" else "＋ My List") { _, _ ->
+                val added = store.toggleMyMovie(m)
+                toast(if (added) "Added to My List" else "Removed from My List")
+                renderMovies()
+            }
+            .setNegativeButton(if (resumeAt > 0) "Start over" else "Close") { _, _ -> if (resumeAt > 0) playMovie(m, 0L) }
+            .show()
+    }
+
+    private fun playMovie(m: Movie, startAt: Long) {
+        toast("Opening ${m.title}…")
+        moviePool.execute {
+            val url = try {
+                MovieCatalog.streamUrl(m.id, download(MovieCatalog.metadataUrl(m.id)))
+            } catch (e: Exception) { null }
+            runOnUiThread {
+                if (url == null) { toast("This film isn't available to stream right now."); return@runOnUiThread }
+                startActivity(
+                    Intent(this, MovieActivity::class.java)
+                        .putExtra(MovieActivity.EXTRA_URL, url)
+                        .putExtra(MovieActivity.EXTRA_ID, m.id)
+                        .putExtra(MovieActivity.EXTRA_TITLE, m.title)
+                        .putExtra(MovieActivity.EXTRA_YEAR, m.year)
+                        .putExtra(MovieActivity.EXTRA_DESC, m.desc)
+                        .putExtra(MovieActivity.EXTRA_START, startAt)
+                )
+            }
+        }
+    }
+
     private fun showSection(s: Section, resume: Boolean = true) {
         val prev = section
         section = s
         homeList.visibility = if (s == Section.HOME) View.VISIBLE else View.GONE
         root.visibility = if (s == Section.LIVE) View.VISIBLE else View.GONE
         guideView.visibility = if (s == Section.GUIDE) View.VISIBLE else View.GONE
+        moviesList.visibility = if (s == Section.MOVIES) View.VISIBLE else View.GONE
         settingsView.visibility = if (s == Section.SETTINGS) View.VISIBLE else View.GONE
         navItems.forEachIndexed { i, v -> v.isSelected = i == s.ordinal }
 
@@ -407,6 +520,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
                 homeList.post { homeAdapter.focusHero(homeList) }
             }
             Section.LIVE -> list.requestFocus()
+            Section.MOVIES -> { loadMovies(); moviesList.post { moviesList.getChildAt(1)?.requestFocus() } }
             Section.GUIDE -> { refreshGuideScreen(); guideList.post { guideList.getChildAt(0)?.requestFocus() } }
             Section.SETTINGS -> { buildSettings(); settingsList.post { settingsList.getChildAt(1)?.requestFocus() } }
         }
@@ -442,7 +556,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
     private fun refreshVisibleSection() {
         when (section) {
             Section.HOME -> {
-                val onNowAvailable = channels.any { epg.now(it.tvgId) != null }
+                val onNowAvailable = channels.any { epg.now(it) != null }
                 if (homeAdapter.itemCount == 0 || (onNowAvailable && !homeAdapter.hasRow(ROW_ON_NOW))) refreshHome()
                 else homeAdapter.refreshInPlace(homeList)
             }
@@ -467,7 +581,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
         val heroCh = current
             ?: store.lastUrl?.let { byUrl[it] }
             ?: store.favOrder.firstNotNullOfOrNull { byUrl[it] }
-            ?: visible.firstOrNull { epg.now(it.tvgId) != null }
+            ?: visible.firstOrNull { epg.now(it) != null }
             ?: visible.firstOrNull()
         if (heroCh != null) {
             val label = if (heroCh.url == current?.url || heroCh.url == store.lastUrl) "CONTINUE WATCHING" else "LIVE NOW"
@@ -477,7 +591,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
         fun row(title: String, list: List<Channel>) { if (list.isNotEmpty()) items.add(HomeItem.Row(title, list)) }
         row("Continue watching", store.recents.mapNotNull { byUrl[it] }.filter { it.url != heroCh?.url }.take(15))
         row("My List", store.favOrder.mapNotNull { byUrl[it] })
-        row(ROW_ON_NOW, visible.filter { epg.now(it.tvgId) != null }.take(40))
+        row(ROW_ON_NOW, visible.filter { epg.now(it) != null }.take(40))
         visible.groupBy { it.group }.entries
             .sortedByDescending { it.value.size }
             .take(12)
@@ -487,8 +601,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
         homeAdapter.submit(items)
     }
 
-    override fun epgNow(ch: Channel) = epg.now(ch.tvgId)
-    override fun epgNext(ch: Channel) = epg.next(ch.tvgId)
+    override fun epgNow(ch: Channel) = epg.now(ch)
+    override fun epgNext(ch: Channel) = epg.next(ch)
     override fun isFav(ch: Channel) = ch.url in store.favs
     override fun isLocked(ch: Channel) = isLockedGroup(ch)
     override fun open(ch: Channel) = watch(ch)
@@ -502,7 +616,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
         val list = when (guideFilter) {
             "fav" -> store.favOrder.mapNotNull { byUrl[it] }
             "all" -> visible
-            else -> visible.filter { epg.upcoming(it.tvgId, 1).isNotEmpty() }
+            else -> visible.filter { epg.upcoming(it, 1).isNotEmpty() }
         }
         findViewById<View>(R.id.chipGuide).isSelected = guideFilter == "guide"
         findViewById<View>(R.id.chipFav).isSelected = guideFilter == "fav"
@@ -538,7 +652,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
         invalidateGuide()
     }
 
-    override fun guideProgs(ch: Channel): List<Epg.Prog> = epg.upcoming(ch.tvgId, 80)
+    override fun guideProgs(ch: Channel): List<Epg.Prog> = epg.upcoming(ch, 80)
 
     override fun guideDrag(dxPx: Float) {
         guideState.left += (dxPx / guideState.pxPerMs).toLong()
@@ -692,15 +806,22 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
     private fun refreshGuide() {
         if (channels.isEmpty()) return
         val ids = channels.mapNotNull { c -> Epg.norm(c.tvgId).takeIf { it.isNotEmpty() } }.toHashSet()
-        if (ids.isEmpty()) return
+        val names = channels.mapNotNull { c -> Epg.nameKey(c.name).takeIf { it.isNotEmpty() } }.toHashSet()
+        fun country(c: Channel) = Epg.norm(c.tvgId).substringAfterLast('.', "")
+            .takeIf { it.length in 2..3 && it.all { ch -> ch.isLetter() } }
+
+        // Countries you actually watch come first, then the most common countries in this list
         val interest = listOfNotNull(current) +
             store.favOrder.mapNotNull { byUrl[it] } +
             store.recents.take(20).mapNotNull { byUrl[it] }
-        val countries = interest.mapNotNull { c ->
-            Epg.norm(c.tvgId).substringAfterLast('.', "").takeIf { it.length in 2..3 && it.all { ch -> ch.isLetter() } }
-        }.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }.map { it.key }.take(4)
+        val countries = LinkedHashSet<String>()
+        interest.mapNotNull { country(it) }.groupingBy { it }.eachCount().entries
+            .sortedByDescending { it.value }.forEach { countries.add(it.key) }
+        channels.mapNotNull { country(it) }.groupingBy { it }.eachCount().entries
+            .sortedByDescending { it.value }.forEach { countries.add(it.key) }
+
         val urls = ArrayList<String>()
-        for (cc in countries) {
+        for (cc in countries.take(7)) {
             val code = cc.uppercase(java.util.Locale.ROOT)
             urls.add(guideCatalog.firstOrNull { it.contains("_${code}1.xml") }
                 ?: "https://epgshare01.online/epgshare01/epg_ripper_${code}1.xml.gz")
@@ -708,7 +829,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
         // Guides a custom playlist names itself (not the big shared list)
         urls.addAll(guideCatalog.filter { !it.contains("epgshare01") }.take(2))
         if (urls.isEmpty()) return
-        epg.load(urls, ids, ::downloadToFile) {
+        epg.load(urls, ids, names, ::downloadToFile) {
             runOnUiThread {
                 adapter.notifyDataSetChanged()
                 if (banner.visibility == View.VISIBLE) current?.let { showBanner(it) }
@@ -728,7 +849,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
     }
 
     private fun showGuide(ch: Channel) {
-        val progs = epg.upcoming(ch.tvgId)
+        val progs = epg.upcoming(ch)
         val msg = if (progs.isEmpty()) {
             "No guide information for this channel yet.\n\nGuides download in the background for the countries you watch, " +
                 "so check again in a minute. Not every free channel has a guide."
@@ -739,7 +860,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
                 "$mark${hhmm(p.start)}   ${p.title}"
             }
         }
-        val now = epg.now(ch.tvgId)
+        val now = epg.now(ch)
         AlertDialog.Builder(this)
             .setTitle("📺 ${ch.name}")
             .setMessage(if (now != null && now.desc.isNotEmpty()) "$msg\n\nNow: ${now.title}\n${now.desc}" else msg)
@@ -1315,8 +1436,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
             }
         } else bannerLogo.setImageResource(R.drawable.logo_placeholder)
         bannerTitle.text = "${ch.number}   ${ch.name}"
-        val now = epg.now(ch.tvgId)
-        val next = epg.next(ch.tvgId)
+        val now = epg.now(ch)
+        val next = epg.next(ch)
         bannerSub.text = when {
             now != null && next != null -> "Now: ${now.title}   ·   ${hhmm(next.start)} ${next.title}"
             now != null -> "Now: ${now.title}"
@@ -1645,6 +1766,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
         handler.postDelayed(minuteTick, 60_000)
         // Coming back to the app: jump to the live edge instead of resuming stale video
         if (section == Section.LIVE) current?.let { reconnects = 0; startSource(it) }
+        // Back from a movie: refresh "Continue watching"
+        if (section == Section.MOVIES) renderMovies()
     }
 
     override fun onStop() {
@@ -1660,6 +1783,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost {
         player.release()
         io.shutdownNow()
         checkPool.shutdownNow()
+        moviePool.shutdownNow()
         epg.shutdown()
         super.onDestroy()
     }

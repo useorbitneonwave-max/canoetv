@@ -11,6 +11,7 @@ CanoeTV is a TV player app for Android phones, tablets, Android TV and Fire TV. 
 
 ## What is stored on your device
 - Favourites and their order, renamed channels, hidden and locked categories
+- Your movie My List and where you stopped in each film
 - Your parental-lock PIN (if you set one)
 - Recently watched channels, the last channel you watched and app settings
 - Downloaded channel lists and TV guide files (a cache)
@@ -20,6 +21,7 @@ This information never leaves your device unless you choose to save a backup fil
 ## What the app connects to
 - **Channel lists:** Free-TV (GitHub), plus any optional lists you switch on (iptv-org) or add yourself.
 - **TV guide files:** epgshare01.online and any guide links named in your playlists.
+- **Movies:** the Internet Archive (archive.org), for the public-domain film catalogue, posters and the films you play.
 - **Streams:** when you play a channel, the video comes directly from that channel's own server.
 - **App updates:** GitHub, to check for and download new versions of CanoeTV.
 

@@ -32,6 +32,7 @@
 
         <TextView android:id="@+id/navHome" style="@style/NavItem" android:text="🏠   Home" />
         <TextView android:id="@+id/navLive" style="@style/NavItem" android:text="📺   Live TV" />
+        <TextView android:id="@+id/navMovies" style="@style/NavItem" android:text="🎬   Movies" />
         <TextView android:id="@+id/navGuide" style="@style/NavItem" android:text="🗓   TV Guide" />
         <TextView android:id="@+id/navSettings" style="@style/NavItem" android:text="⚙   Settings" />
     </LinearLayout>
@@ -49,6 +50,16 @@
             android:layout_height="match_parent"
             android:clipToPadding="false"
             android:paddingBottom="24dp" />
+
+        <!-- MOVIES -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/moviesList"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingTop="12dp"
+            android:paddingBottom="24dp"
+            android:visibility="gone" />
 
         <!-- TV GUIDE -->
         <LinearLayout

@@ -21,6 +21,21 @@ class Epg(private val dir: File) {
 
     companion object {
         fun norm(id: String) = id.substringBefore('@').trim().lowercase(Locale.ROOT)
+
+        private val brackets = Regex("""\([^)]*\)|\[[^\]]*\]""")
+        private val nonAlnum = Regex("[^a-z0-9]")
+        private val suffix = Regex("(hd|fhd|uhd|sd|4k|1080p|720p)$")
+
+        /** "CBC News Network (720p) HD" -> "name:cbcnewsnetwork", for matching guides by channel name. */
+        fun nameKey(name: String): String {
+            var k = brackets.replace(name.lowercase(Locale.ROOT), "")
+            k = nonAlnum.replace(k, "")
+            repeat(2) { k = suffix.replace(k, "") }
+            return if (k.length >= 3) "name:$k" else ""
+        }
+
+        private fun keysFor(ch: Channel): List<String> =
+            listOf(norm(ch.tvgId), nameKey(ch.name)).filter { it.isNotEmpty() }
     }
 
     private val data = ConcurrentHashMap<String, List<Prog>>()
@@ -28,29 +43,32 @@ class Epg(private val dir: File) {
     private val pool = Executors.newSingleThreadExecutor()
     private val fmt = SimpleDateFormat("yyyyMMddHHmmss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
 
-    fun now(id: String): Prog? {
-        if (id.isBlank()) return null
-        val t = System.currentTimeMillis()
-        return data[norm(id)]?.firstOrNull { it.start <= t && t < it.stop }
+    /** Guide entries for a channel: matched by its guide ID first, then by its name. */
+    private fun progsFor(ch: Channel): List<Prog>? {
+        for (k in keysFor(ch)) data[k]?.let { return it }
+        return null
     }
 
-    fun next(id: String): Prog? {
-        if (id.isBlank()) return null
+    fun now(ch: Channel): Prog? {
         val t = System.currentTimeMillis()
-        return data[norm(id)]?.firstOrNull { it.start > t }
+        return progsFor(ch)?.firstOrNull { it.start <= t && t < it.stop }
     }
 
-    fun upcoming(id: String, max: Int = 40): List<Prog> {
-        if (id.isBlank()) return emptyList()
+    fun next(ch: Channel): Prog? {
         val t = System.currentTimeMillis()
-        return data[norm(id)]?.filter { it.stop > t }?.take(max) ?: emptyList()
+        return progsFor(ch)?.firstOrNull { it.start > t }
+    }
+
+    fun upcoming(ch: Channel, max: Int = 40): List<Prog> {
+        val t = System.currentTimeMillis()
+        return progsFor(ch)?.filter { it.stop > t }?.take(max) ?: emptyList()
     }
 
     /**
      * Loads each guide URL (cached on disk for 12h), keeping only channels in [wanted].
      * [fetch] downloads a URL into a file. [onUpdate] runs (on a background thread) after each file.
      */
-    fun load(urls: List<String>, wanted: Set<String>, fetch: (String, File) -> Unit, onUpdate: () -> Unit) {
+    fun load(urls: List<String>, wanted: Set<String>, wantedNames: Set<String>, fetch: (String, File) -> Unit, onUpdate: () -> Unit) {
         val now = System.currentTimeMillis()
         for (u in urls.distinct()) {
             val last = attempted[u]
@@ -64,7 +82,7 @@ class Epg(private val dir: File) {
                         fetch(u, tmp)
                         if (!tmp.renameTo(f)) { tmp.copyTo(f, overwrite = true); tmp.delete() }
                     }
-                    parse(f, wanted)
+                    parse(f, wanted, wantedNames)
                     onUpdate()
                 } catch (e: Throwable) {
                     // No guide for this country right now — try again later
@@ -73,7 +91,7 @@ class Epg(private val dir: File) {
         }
     }
 
-    private fun parse(f: File, wanted: Set<String>) {
+    private fun parse(f: File, wanted: Set<String>, wantedNames: Set<String>) {
         val windowStart = System.currentTimeMillis() - 3600_000L
         val windowEnd = System.currentTimeMillis() + 36 * 3600_000L
         val found = HashMap<String, MutableList<Prog>>()
@@ -89,6 +107,8 @@ class Epg(private val dir: File) {
             val p = Xml.newPullParser()
             p.setInput(ins, null)
             var ch: String? = null
+            var inChannel: String? = null           // id of the <channel> element being read
+            val alias = HashMap<String, String>()  // guide id -> name key, for channels matched by name
             var start = 0L
             var stop = 0L
             var title = ""
@@ -97,9 +117,17 @@ class Epg(private val dir: File) {
             while (ev != XmlPullParser.END_DOCUMENT) {
                 if (ev == XmlPullParser.START_TAG) {
                     when (p.name) {
+                        "channel" -> inChannel = norm(p.getAttributeValue(null, "id") ?: "")
+                        "display-name" -> {
+                            val id = inChannel
+                            if (id != null && id !in wanted && id !in alias) {
+                                val key = nameKey(p.nextText())
+                                if (key.isNotEmpty() && key in wantedNames) alias[id] = key
+                            }
+                        }
                         "programme" -> {
                             val id = norm(p.getAttributeValue(null, "channel") ?: "")
-                            ch = if (id in wanted) id else null
+                            ch = if (id in wanted) id else alias[id]
                             if (ch != null) {
                                 start = time(p.getAttributeValue(null, "start"))
                                 stop = time(p.getAttributeValue(null, "stop"))
@@ -109,6 +137,8 @@ class Epg(private val dir: File) {
                         "title" -> if (ch != null && title.isEmpty()) title = p.nextText().trim()
                         "desc" -> if (ch != null && desc.isEmpty()) desc = p.nextText().trim()
                     }
+                } else if (ev == XmlPullParser.END_TAG && p.name == "channel") {
+                    inChannel = null
                 } else if (ev == XmlPullParser.END_TAG && p.name == "programme") {
                     val c = ch
                     if (c != null && stop > windowStart && start < windowEnd && start > 0 && title.isNotEmpty()) {
