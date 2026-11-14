@@ -60,7 +60,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(UnstableApi::class)
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), TvHost, GuideHost {
 
     companion object {
         private const val KEY_ALL = "\u0000all"
@@ -84,8 +84,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sourceSpinner: Spinner
     private lateinit var groupSpinner: Spinner
     private lateinit var search: EditText
-    private lateinit var hideDead: CheckBox
-    private lateinit var autoSkip: CheckBox
+    private lateinit var shell: LinearLayout
+    private lateinit var navBar: LinearLayout
+    private lateinit var navBrand: TextView
+    private lateinit var navItems: List<TextView>
+    private lateinit var content: FrameLayout
+    private lateinit var homeList: RecyclerView
+    private lateinit var homeAdapter: HomeAdapter
+    private lateinit var guideView: LinearLayout
+    private lateinit var guideList: RecyclerView
+    private lateinit var guideRuler: TimeRulerView
+    private lateinit var guideEmpty: TextView
+    private lateinit var guideState: GuideState
+    private lateinit var guideAdapter: GuideAdapter
+    private lateinit var settingsView: View
+    private lateinit var settingsList: LinearLayout
     private lateinit var status: TextView
     private lateinit var list: RecyclerView
 
@@ -132,8 +145,6 @@ class MainActivity : AppCompatActivity() {
         sourceSpinner = findViewById(R.id.sourceSpinner)
         groupSpinner = findViewById(R.id.groupSpinner)
         search = findViewById(R.id.search)
-        hideDead = findViewById(R.id.hideDead)
-        autoSkip = findViewById(R.id.autoSkip)
         status = findViewById(R.id.status)
         list = findViewById(R.id.list)
 
@@ -168,10 +179,6 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: Editable?) = applyFilter()
         })
 
-        hideDead.isChecked = store.hideDead
-        hideDead.setOnCheckedChangeListener { _, on -> store.hideDead = on; applyFilter() }
-        autoSkip.isChecked = store.autoSkip
-        autoSkip.setOnCheckedChangeListener { _, on -> store.autoSkip = on }
 
         groupSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) = applyFilter()
@@ -182,12 +189,16 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.menuBtn).setOnClickListener { showMenu() }
 
         backCallback = object : OnBackPressedCallback(false) {
-            override fun handleOnBackPressed() = setFullscreen(false)
+            override fun handleOnBackPressed() {
+                if (fullscreen) setFullscreen(false) else showSection(Section.HOME)
+            }
         }
         onBackPressedDispatcher.addCallback(this, backCallback)
 
+        setupShell()
         setupSources(selectId = store.sourceId)
         applyLayout()
+        showSection(Section.HOME)
 
         // Look for a newer version shortly after start-up (at most twice a day)
         handler.postDelayed({ checkForUpdates(manual = false) }, 8_000)
@@ -227,10 +238,33 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("CanoeTV ${BuildConfig.VERSION_NAME}")
             .setMessage(
-                "Free channels from Free-TV and iptv-org.\n\n" +
-                    "Remote tips:\n• OK — play / OK again for full screen\n• Up/Down in full screen — change channel\n" +
-                    "• Number keys — jump to a channel number\n• 0 or Last — back to the previous channel\n" +
-                    "• Long-press OK — channel options (favourite, guide, rename, move)\n• Menu — this menu"
+                "CanoeTV is a TV player. It doesn't host, sell or own any channels — it plays free streams " +
+                    "that broadcasters make publicly available, and playlists you add yourself.\n\n" +
+                    "Channel lists\n• Free-TV (github.com/Free-TV/IPTV) — built in\n" +
+                    "• iptv-org (github.com/iptv-org/iptv) — optional, switched on in Settings\n\n" +
+                    "TV guide data\n• epgshare01.online, and guide links named by your playlists\n\n" +
+                    "Made with\n• AndroidX Media3 (Apache 2.0)\n• Coil (Apache 2.0)\n\n" +
+                    "If you own a channel and want it removed, please contact the list it comes from.\n\n" +
+                    "Remote tips\n• OK — play / OK again for full screen\n• Up/Down in full screen — change channel\n" +
+                    "• Number keys — jump to a channel number\n• 0 or Last — previous channel\n" +
+                    "• Long-press OK — channel options\n• Back — return to Home"
+            )
+            .setPositiveButton("OK", null)
+            .setNeutralButton("Privacy policy") { _, _ -> showPrivacy() }
+            .show()
+    }
+
+    private fun showPrivacy() {
+        AlertDialog.Builder(this)
+            .setTitle("Privacy policy")
+            .setMessage(
+                "CanoeTV has no accounts, no ads and no tracking.\n\n" +
+                    "Stored only on this device: your favourites, renamed channels, hidden and locked categories, " +
+                    "your PIN, recently watched channels and app settings. Uninstalling the app deletes them.\n\n" +
+                    "Internet requests: CanoeTV downloads channel lists and TV guide files, plays the streams you choose " +
+                    "(directly from each channel's server) and checks GitHub for app updates. Those servers see your IP " +
+                    "address, as with any website. CanoeTV doesn't send them anything about you.\n\n" +
+                    "Full policy: github.com/${BuildConfig.REPO}/blob/main/PRIVACY.md"
             )
             .setPositiveButton("OK", null)
             .show()
@@ -243,10 +277,416 @@ class MainActivity : AppCompatActivity() {
         toast("Offline marks cleared — all channels will be tried again.")
     }
 
+    // ------------------------------------------------------------------ sections (Home, Live TV, Guide, Settings)
+
+    private enum class Section { HOME, LIVE, GUIDE, SETTINGS }
+
+    private var section = Section.HOME
+    private var homeDirty = true
+    private var guideFilter = "guide"
+    private val sectionRefresh = Runnable { refreshVisibleSection() }
+    private val minuteTick = object : Runnable {
+        override fun run() {
+            refreshVisibleSection()
+            handler.postDelayed(this, 60_000)
+        }
+    }
+
+    private fun setupShell() {
+        shell = findViewById(R.id.shell)
+        navBar = findViewById(R.id.navBar)
+        navBrand = findViewById(R.id.navBrand)
+        content = findViewById(R.id.content)
+        homeList = findViewById(R.id.homeList)
+        guideView = findViewById(R.id.guideView)
+        guideList = findViewById(R.id.guideList)
+        guideRuler = findViewById(R.id.guideRuler)
+        guideEmpty = findViewById(R.id.guideEmpty)
+        settingsView = findViewById(R.id.settingsView)
+        settingsList = findViewById(R.id.settingsList)
+
+        val navHome = findViewById<TextView>(R.id.navHome)
+        val navLive = findViewById<TextView>(R.id.navLive)
+        val navGuide = findViewById<TextView>(R.id.navGuide)
+        val navSettings = findViewById<TextView>(R.id.navSettings)
+        navItems = listOf(navHome, navLive, navGuide, navSettings)
+        navHome.setOnClickListener { showSection(Section.HOME) }
+        navLive.setOnClickListener { showSection(Section.LIVE) }
+        navGuide.setOnClickListener { showSection(Section.GUIDE) }
+        navSettings.setOnClickListener { showSection(Section.SETTINGS) }
+
+        homeAdapter = HomeAdapter(this)
+        homeList.layoutManager = LinearLayoutManager(this)
+        homeList.adapter = homeAdapter
+        homeList.itemAnimator = null
+
+        guideState = GuideState(this)
+        guideRuler.state = guideState
+        guideAdapter = GuideAdapter(guideState, this)
+        guideList.layoutManager = LinearLayoutManager(this)
+        guideList.adapter = guideAdapter
+        guideList.itemAnimator = null
+
+        findViewById<View>(R.id.chipGuide).setOnClickListener { guideFilter = "guide"; refreshGuideScreen() }
+        findViewById<View>(R.id.chipFav).setOnClickListener { guideFilter = "fav"; refreshGuideScreen() }
+        findViewById<View>(R.id.chipAll).setOnClickListener { guideFilter = "all"; refreshGuideScreen() }
+        findViewById<View>(R.id.guideEarlier).setOnClickListener { moveGuide(-3600_000L) }
+        findViewById<View>(R.id.guideLater).setOnClickListener { moveGuide(3600_000L) }
+        findViewById<View>(R.id.guideNow).setOnClickListener {
+            guideState.left = GuideState.halfHour(System.currentTimeMillis())
+            guideState.cursor = System.currentTimeMillis()
+            invalidateGuide()
+        }
+    }
+
+    /** Side menu on TVs and landscape screens; a bottom bar on phones held upright. */
+    private fun applyShell() {
+        if (!::shell.isInitialized) return
+        val mp = ViewGroup.LayoutParams.MATCH_PARENT
+        val wc = ViewGroup.LayoutParams.WRAP_CONTENT
+        val dens = resources.displayMetrics.density
+        navBar.visibility = if (fullscreen || inPip) View.GONE else View.VISIBLE
+        val labels = listOf("🏠" to "Home", "📺" to "Live TV", "🗓" to "Guide", "⚙" to "Settings")
+        val bottomBar = !isTv() && resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+        if (bottomBar) {
+            shell.orientation = LinearLayout.VERTICAL
+            if (shell.indexOfChild(navBar) != shell.childCount - 1) { shell.removeView(navBar); shell.addView(navBar) }
+            navBar.orientation = LinearLayout.HORIZONTAL
+            navBar.layoutParams = LinearLayout.LayoutParams(mp, wc)
+            navBar.setPadding((4 * dens).toInt(), (4 * dens).toInt(), (4 * dens).toInt(), (4 * dens).toInt())
+            content.layoutParams = LinearLayout.LayoutParams(mp, 0, 1f)
+            navBrand.visibility = View.GONE
+            navItems.forEachIndexed { i, v ->
+                v.layoutParams = LinearLayout.LayoutParams(0, wc, 1f)
+                v.gravity = android.view.Gravity.CENTER
+                v.isSingleLine = false
+                v.textSize = 12f
+                v.text = "${labels[i].first}\n${labels[i].second}"
+            }
+        } else {
+            shell.orientation = LinearLayout.HORIZONTAL
+            if (shell.indexOfChild(navBar) != 0) { shell.removeView(navBar); shell.addView(navBar, 0) }
+            navBar.orientation = LinearLayout.VERTICAL
+            val w = if (isTv() || resources.configuration.smallestScreenWidthDp >= 600) 190 else 150
+            navBar.layoutParams = LinearLayout.LayoutParams((w * dens).toInt(), mp)
+            navBar.setPadding((10 * dens).toInt(), (18 * dens).toInt(), (10 * dens).toInt(), (10 * dens).toInt())
+            content.layoutParams = LinearLayout.LayoutParams(0, mp, 1f)
+            navBrand.visibility = View.VISIBLE
+            navItems.forEachIndexed { i, v ->
+                v.layoutParams = LinearLayout.LayoutParams(mp, wc).also { it.bottomMargin = (4 * dens).toInt() }
+                v.gravity = android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.START
+                v.isSingleLine = true
+                v.textSize = 16f
+                v.text = "${labels[i].first}   ${labels[i].second}"
+            }
+        }
+    }
+
+    private fun updateBack() {
+        if (::backCallback.isInitialized) backCallback.isEnabled = fullscreen || section != Section.HOME
+    }
+
+    private fun showSection(s: Section, resume: Boolean = true) {
+        val prev = section
+        section = s
+        homeList.visibility = if (s == Section.HOME) View.VISIBLE else View.GONE
+        root.visibility = if (s == Section.LIVE) View.VISIBLE else View.GONE
+        guideView.visibility = if (s == Section.GUIDE) View.VISIBLE else View.GONE
+        settingsView.visibility = if (s == Section.SETTINGS) View.VISIBLE else View.GONE
+        navItems.forEachIndexed { i, v -> v.isSelected = i == s.ordinal }
+
+        if (prev == Section.LIVE && s != Section.LIVE) {
+            player.pause()
+            banner.visibility = View.GONE
+        }
+        if (s == Section.LIVE && prev != Section.LIVE && resume) current?.let { reconnects = 0; startSource(it) }
+
+        when (s) {
+            Section.HOME -> {
+                if (homeDirty || homeAdapter.itemCount == 0) refreshHome()
+                homeList.post { homeAdapter.focusHero(homeList) }
+            }
+            Section.LIVE -> list.requestFocus()
+            Section.GUIDE -> { refreshGuideScreen(); guideList.post { guideList.getChildAt(0)?.requestFocus() } }
+            Section.SETTINGS -> { buildSettings(); settingsList.post { settingsList.getChildAt(1)?.requestFocus() } }
+        }
+        updateBack()
+    }
+
+    /** Opens a channel full screen from anywhere in the app. */
+    private fun watch(ch: Channel) {
+        if (needsPin(ch)) {
+            askPin("Enter your PIN to watch ${ch.name}") { unlocked = true; adapter.notifyDataSetChanged(); watch(ch) }
+            return
+        }
+        if (section != Section.LIVE) showSection(Section.LIVE, resume = false)
+        play(ch, auto = false)
+        setFullscreen(true)
+    }
+
+    private fun refreshSections() {
+        homeDirty = true
+        when (section) {
+            Section.HOME -> refreshHome()
+            Section.GUIDE -> refreshGuideScreen()
+            else -> Unit
+        }
+    }
+
+    private fun scheduleSectionRefresh() {
+        handler.removeCallbacks(sectionRefresh)
+        handler.postDelayed(sectionRefresh, 1_500)
+    }
+
+    /** New guide data or a minute passed: update what's on screen without moving focus. */
+    private fun refreshVisibleSection() {
+        when (section) {
+            Section.HOME -> {
+                val onNowAvailable = channels.any { epg.now(it.tvgId) != null }
+                if (homeAdapter.itemCount == 0 || (onNowAvailable && !homeAdapter.hasRow(ROW_ON_NOW))) refreshHome()
+                else homeAdapter.refreshInPlace(homeList)
+            }
+            Section.GUIDE -> {
+                if (guideAdapter.itemCount == 0) refreshGuideScreen()
+                else { guideAdapter.notifyItemRangeChanged(0, guideAdapter.itemCount); invalidateGuide() }
+            }
+            else -> Unit
+        }
+    }
+
+    // ---- Home
+
+    private val ROW_ON_NOW = "On now"
+
+    private fun refreshHome() {
+        homeDirty = false
+        if (channels.isEmpty()) { homeAdapter.submit(emptyList()); return }
+        val visible = channels.filter { it.group !in store.hiddenGroups && store.health(it.url) != false }
+        val items = ArrayList<HomeItem>()
+
+        val heroCh = current
+            ?: store.lastUrl?.let { byUrl[it] }
+            ?: store.favOrder.firstNotNullOfOrNull { byUrl[it] }
+            ?: visible.firstOrNull { epg.now(it.tvgId) != null }
+            ?: visible.firstOrNull()
+        if (heroCh != null) {
+            val label = if (heroCh.url == current?.url || heroCh.url == store.lastUrl) "CONTINUE WATCHING" else "LIVE NOW"
+            items.add(HomeItem.Hero(heroCh, label))
+        }
+
+        fun row(title: String, list: List<Channel>) { if (list.isNotEmpty()) items.add(HomeItem.Row(title, list)) }
+        row("Continue watching", store.recents.mapNotNull { byUrl[it] }.filter { it.url != heroCh?.url }.take(15))
+        row("My List", store.favOrder.mapNotNull { byUrl[it] })
+        row(ROW_ON_NOW, visible.filter { epg.now(it.tvgId) != null }.take(40))
+        visible.groupBy { it.group }.entries
+            .sortedByDescending { it.value.size }
+            .take(12)
+            .forEach { (group, chs) ->
+                row(group, chs.sortedByDescending { store.health(it.url) == true }.take(30))
+            }
+        homeAdapter.submit(items)
+    }
+
+    override fun epgNow(ch: Channel) = epg.now(ch.tvgId)
+    override fun epgNext(ch: Channel) = epg.next(ch.tvgId)
+    override fun isFav(ch: Channel) = ch.url in store.favs
+    override fun isLocked(ch: Channel) = isLockedGroup(ch)
+    override fun open(ch: Channel) = watch(ch)
+    override fun options(ch: Channel) = showChannelOptions(ch)
+    override fun openGuide() = showSection(Section.GUIDE)
+
+    // ---- Guide grid
+
+    private fun refreshGuideScreen() {
+        val visible = channels.filter { it.group !in store.hiddenGroups }
+        val list = when (guideFilter) {
+            "fav" -> store.favOrder.mapNotNull { byUrl[it] }
+            "all" -> visible
+            else -> visible.filter { epg.upcoming(it.tvgId, 1).isNotEmpty() }
+        }
+        findViewById<View>(R.id.chipGuide).isSelected = guideFilter == "guide"
+        findViewById<View>(R.id.chipFav).isSelected = guideFilter == "fav"
+        findViewById<View>(R.id.chipAll).isSelected = guideFilter == "all"
+        guideEmpty.text = when {
+            channels.isEmpty() -> "Channels are loading…"
+            guideFilter == "fav" -> "No favourites yet. Long-press a channel and choose Add to favourites."
+            guideFilter == "guide" -> "TV guide data is downloading for the countries you watch. Check back in a minute, or choose All channels."
+            else -> "No channels."
+        }
+        guideEmpty.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
+        guideAdapter.submit(list)
+        invalidateGuide()
+    }
+
+    private fun invalidateGuide() {
+        guideRuler.invalidate()
+        for (i in 0 until guideList.childCount) {
+            (guideList.getChildViewHolder(guideList.getChildAt(i)) as? GuideAdapter.VH)?.strip?.invalidate()
+        }
+    }
+
+    private fun clampGuide() {
+        val min = GuideState.halfHour(System.currentTimeMillis() - 3600_000L)
+        val max = System.currentTimeMillis() + 30 * 3600_000L
+        guideState.left = guideState.left.coerceIn(min, max)
+    }
+
+    private fun moveGuide(byMs: Long) {
+        guideState.left += byMs
+        clampGuide()
+        guideState.cursor = guideState.left + 15 * 60_000L
+        invalidateGuide()
+    }
+
+    override fun guideProgs(ch: Channel): List<Epg.Prog> = epg.upcoming(ch.tvgId, 80)
+
+    override fun guideDrag(dxPx: Float) {
+        guideState.left += (dxPx / guideState.pxPerMs).toLong()
+        clampGuide()
+        val span = (guideRuler.width / guideState.pxPerMs).toLong()
+        if (guideState.cursor < guideState.left || guideState.cursor > guideState.left + span) {
+            guideState.cursor = guideState.left + span / 4
+        }
+        invalidateGuide()
+    }
+
+    override fun guideCursorMoved() {
+        val span = (guideRuler.width / guideState.pxPerMs).toLong().coerceAtLeast(3600_000L)
+        if (guideState.cursor < guideState.left) guideState.left = GuideState.halfHour(guideState.cursor)
+        if (guideState.cursor > guideState.left + span * 85 / 100) {
+            guideState.left = GuideState.halfHour(guideState.cursor - span * 30 / 100)
+        }
+        clampGuide()
+        invalidateGuide()
+    }
+
+    override fun guideTap(ch: Channel, prog: Epg.Prog?) {
+        val now = System.currentTimeMillis()
+        if (prog == null || (prog.start <= now && now < prog.stop)) { watch(ch); return }
+        AlertDialog.Builder(this)
+            .setTitle(prog.title)
+            .setMessage("${ch.name}\n${hhmm(prog.start)} – ${hhmm(prog.stop)}" + if (prog.desc.isNotEmpty()) "\n\n${prog.desc}" else "")
+            .setPositiveButton("Watch ${ch.name} now") { _, _ -> watch(ch) }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    override fun guideOptions(ch: Channel) = showChannelOptions(ch)
+
+    // ---- Settings
+
+    private fun buildSettings() {
+        settingsList.removeAllViews()
+        val dens = resources.displayMetrics.density
+        fun dp(v: Int) = (v * dens).toInt()
+
+        val title = TextView(this).apply {
+            text = "Settings"; textSize = 28f; setTextColor(0xFFFFFFFF.toInt())
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, dp(8))
+        }
+        settingsList.addView(title)
+
+        fun header(t: String) {
+            settingsList.addView(TextView(this).apply {
+                text = t.uppercase(); textSize = 13f; letterSpacing = 0.1f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.accent))
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(dp(4), dp(20), 0, dp(8))
+            })
+        }
+
+        fun row(t: String, sub: String, action: (TextView) -> Unit) {
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.settings_row_bg)
+                isFocusable = true; isClickable = true
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+            }
+            val tv = TextView(this).apply { text = t; textSize = 16f; setTextColor(0xFFFFFFFF.toInt()) }
+            val sv = TextView(this).apply {
+                text = sub; textSize = 13f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.muted))
+            }
+            box.addView(tv); box.addView(sv)
+            box.setOnClickListener { action(sv) }
+            settingsList.addView(box, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .also { it.bottomMargin = dp(6) })
+        }
+
+        fun toggle(t: String, sub: String, get: () -> Boolean, set: (Boolean) -> Unit) {
+            fun label() = (if (get()) "On" else "Off") + " — " + sub
+            row(t, label()) { sv -> set(!get()); sv.text = label() }
+        }
+
+        header("Channels")
+        val extras = Sources.extras().filter { it.id in store.enabledExtras }.map { it.name }
+        row("Channel lists", (listOf("Free-TV") + extras).joinToString(" · ")) { showExtrasDialog() }
+        row("Add your own playlist", "An M3U link from a provider you subscribe to") { showAddDialog() }
+        row("Remove one of your playlists", "${store.customSources().size} added") { showRemoveDialog() }
+        row("Show / hide categories", "${store.hiddenGroups.size} hidden") { showHideCategories() }
+        row("Retry offline channels", "Clear the red offline marks and test again") { retryOffline() }
+
+        header("Playback")
+        toggle("Hide offline channels", "dead channels disappear from lists", { store.hideDead }) { store.hideDead = it; applyFilter() }
+        toggle("Skip dead channels automatically", "jump to the next channel when one fails", { store.autoSkip }) { store.autoSkip = it }
+        row("Sleep timer", if (sleepAt > 0) "Stops in ${((sleepAt - System.currentTimeMillis()) / 60_000).coerceAtLeast(1)} min" else "Off") { showSleepTimer() }
+
+        header("TV guide")
+        row("Refresh the TV guide", "Download fresh guide data now") {
+            epg.reset(); refreshGuide(); toast("Downloading fresh guide data…")
+        }
+
+        header("Family & backup")
+        row("Parental lock", if (store.pin != null) "On — ${store.lockedGroups.size} categories locked" else "Off") { showParentalLock() }
+        row("Back up / restore", "Copy your favourites and settings to another device") { showBackup() }
+
+        header("App")
+        row("Check for updates", "You have version ${BuildConfig.VERSION_NAME}") { checkForUpdates(manual = true) }
+        row("About CanoeTV & legal", "Where channels come from, credits, remote tips") { showAbout() }
+        row("Privacy policy", "What CanoeTV stores and sends") { showPrivacy() }
+    }
+
+    private fun showExtrasDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Extra channel lists")
+            .setMessage(
+                "Free-TV is built in. You can also switch on lists from iptv-org, a community project that " +
+                    "collects links to publicly available streams from around the world.\n\n" +
+                    "CanoeTV doesn't host these streams or check who owns the rights to them, and some may not " +
+                    "be allowed where you live. Only watch channels you're allowed to watch."
+            )
+            .setPositiveButton("Choose lists") { _, _ -> chooseExtras() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun chooseExtras() {
+        val all = Sources.extras()
+        val checked = BooleanArray(all.size) { all[it].id in store.enabledExtras }
+        AlertDialog.Builder(this)
+            .setTitle("Switch on lists")
+            .setMultiChoiceItems(all.map { it.name }.toTypedArray(), checked) { _, i, on -> checked[i] = on }
+            .setPositiveButton("Save") { _, _ ->
+                store.enabledExtras.clear()
+                all.forEachIndexed { i, src -> if (checked[i]) store.enabledExtras.add(src.id) }
+                store.saveExtras()
+                val keep = loadedSourceId?.takeIf { id ->
+                    id == "freetv" || id.startsWith("custom:") || id in store.enabledExtras
+                } ?: "freetv"
+                if (keep != loadedSourceId) loadedSourceId = null
+                setupSources(selectId = keep)
+                toast("Pick a list from the menu at the top of Live TV")
+                if (section == Section.SETTINGS) buildSettings()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     // ------------------------------------------------------------------ TV guide
 
     private val timeFmt = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
-    private fun hhmm(t: Long): String = timeFmt.format(java.util.Date(t))
+    override fun hhmm(t: Long): String = timeFmt.format(java.util.Date(t))
 
     /** Downloads guide data for the countries of the channels you actually watch (max 4 at a time). */
     private fun refreshGuide() {
@@ -272,6 +712,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 adapter.notifyDataSetChanged()
                 if (banner.visibility == View.VISIBLE) current?.let { showBanner(it) }
+                scheduleSectionRefresh()
             }
         }
     }
@@ -561,7 +1002,7 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ sources & loading
 
     private fun setupSources(selectId: String) {
-        sources = Sources.builtIn() + store.customSources()
+        sources = Sources.core() + Sources.extras().filter { it.id in store.enabledExtras } + store.customSources()
         val labels = sources.map { if (it.custom) "📁 ${it.name}" else it.name }
         sourceSpinner.adapter = ArrayAdapter(this, R.layout.spinner_item, labels).also {
             it.setDropDownViewResource(R.layout.spinner_item)
@@ -617,11 +1058,8 @@ class MainActivity : AppCompatActivity() {
                     result.isEmpty() -> showMessage("Couldn't load this playlist. Check your internet connection and try again.", error = true)
                     failed > 0 -> toast("Some of the playlist couldn't be downloaded — showing what loaded.")
                 }
-                if (result.isNotEmpty() && current == null) {
-                    val last = store.lastUrl?.let { byUrl[it] }
-                    if (last != null) play(last, auto = false)
-                    else showMessage("Pick a channel to start watching", error = false)
-                }
+                if (result.isNotEmpty() && current == null) showMessage("Pick a channel to start watching", error = false)
+                refreshSections()
             }
         }
     }
@@ -725,7 +1163,7 @@ class MainActivity : AppCompatActivity() {
         }
         val q = search.text.toString().trim()
         if (q.isNotEmpty()) base = base.filter { it.name.contains(q, ignoreCase = true) }
-        if (hideDead.isChecked) base = base.filter { store.health(it.url) != false }
+        if (store.hideDead) base = base.filter { store.health(it.url) != false }
         filtered = base
         adapter.submit(filtered, current?.url)
         status.text = "${filtered.size} channels"
@@ -734,13 +1172,14 @@ class MainActivity : AppCompatActivity() {
         handler.postDelayed(checkRunnable, 2_000)
     }
 
-    private fun toggleFav(ch: Channel) {
+    override fun toggleFav(ch: Channel) {
         if (!store.favs.remove(ch.url)) store.favs.add(ch.url)
         store.saveFavs()
         toast(if (ch.url in store.favs) "Added ${ch.name} to favourites" else "Removed from favourites")
         val key = groupKeys.getOrNull(groupSpinner.selectedItemPosition)
         buildGroups()
         if (key == KEY_FAV) applyFilter() else adapter.refresh(ch.url)
+        homeDirty = true
     }
 
     // ------------------------------------------------------------------ background channel check
@@ -771,7 +1210,7 @@ class MainActivity : AppCompatActivity() {
                 if (gen != checkGen) return@runOnUiThread
                 if (n == total) {
                     status.text = "${working.get()} of $total checked work"
-                    if (hideDead.isChecked) {
+                    if (store.hideDead) {
                         // Re-filter without starting another check straight away
                         applyFilter()
                         handler.removeCallbacks(checkRunnable)
@@ -847,7 +1286,7 @@ class MainActivity : AppCompatActivity() {
     private fun lastChannel() {
         val p = previous
         if (p == null) { toast("No previous channel yet"); return }
-        play(p, auto = false)
+        if (section == Section.LIVE) play(p, auto = false) else watch(p)
     }
 
     private fun step(delta: Int, auto: Boolean = false) {
@@ -893,7 +1332,7 @@ class MainActivity : AppCompatActivity() {
         val n = typedNumber.toIntOrNull()
         typedNumber = ""
         val ch = n?.let { channels.getOrNull(it - 1) }
-        if (ch != null) play(ch, auto = false)
+        if (ch != null) watch(ch)
         else { banner.visibility = View.GONE; toast("There's no channel $n in this list") }
     }
 
@@ -979,7 +1418,7 @@ class MainActivity : AppCompatActivity() {
             }
             store.setHealth(ch.url, false)
             adapter.refresh(ch.url)
-            val willSkip = autoSkip.isChecked && skipCount < 15 && filtered.size > 1
+            val willSkip = store.autoSkip && skipCount < 15 && filtered.size > 1
             showMessage(
                 "Couldn't play ${ch.name}\n${reason(error)}" + if (willSkip) "\n\nSkipping to the next channel…" else "",
                 error = true,
@@ -1109,7 +1548,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setFullscreen(on: Boolean) {
         fullscreen = on
-        backCallback.isEnabled = on
+        updateBack()
         val ctl = WindowCompat.getInsetsController(window, window.decorView)
         if (on) {
             ctl.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -1122,6 +1561,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyLayout() {
+        applyShell()
         val land = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val mp = ViewGroup.LayoutParams.MATCH_PARENT
         when {
@@ -1153,7 +1593,7 @@ class MainActivity : AppCompatActivity() {
     // Leaving the app while a channel plays (phones/tablets): keep watching in a small floating window
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isTv() && player.isPlaying) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isTv() && section == Section.LIVE && player.isPlaying) {
             try {
                 enterPictureInPictureMode(PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build())
             } catch (e: Exception) { /* device doesn't support it */ }
@@ -1175,8 +1615,8 @@ class MainActivity : AppCompatActivity() {
             val typing = currentFocus is EditText
             val code = event.keyCode
             when {
-                code == KeyEvent.KEYCODE_CHANNEL_UP -> { step(-1); return true }
-                code == KeyEvent.KEYCODE_CHANNEL_DOWN -> { step(1); return true }
+                code == KeyEvent.KEYCODE_CHANNEL_UP && section == Section.LIVE -> { step(-1); return true }
+                code == KeyEvent.KEYCODE_CHANNEL_DOWN && section == Section.LIVE -> { step(1); return true }
                 code == KeyEvent.KEYCODE_LAST_CHANNEL -> { lastChannel(); return true }
                 code == KeyEvent.KEYCODE_MENU -> { showMenu(); return true }
                 !typing && code in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> {
@@ -1201,13 +1641,16 @@ class MainActivity : AppCompatActivity() {
         super.onStart()
         handler.removeCallbacks(watchdog)
         handler.postDelayed(watchdog, 5_000)
+        handler.removeCallbacks(minuteTick)
+        handler.postDelayed(minuteTick, 60_000)
         // Coming back to the app: jump to the live edge instead of resuming stale video
-        current?.let { reconnects = 0; startSource(it) }
+        if (section == Section.LIVE) current?.let { reconnects = 0; startSource(it) }
     }
 
     override fun onStop() {
         super.onStop()
         handler.removeCallbacks(watchdog)
+        handler.removeCallbacks(minuteTick)
         player.pause()
     }
 

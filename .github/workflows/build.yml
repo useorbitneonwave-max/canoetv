@@ -37,8 +37,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: CanoeTV 1.0.${{ github.run_number }}
+          tag_name: v1.1.${{ github.run_number }}
+          name: CanoeTV 1.1.${{ github.run_number }}
           body: |
             Download **CanoeTV.apk** below and install it on your Android phone, tablet, Android TV or Fire TV.
             Fire TV / Android TV: enter code **8491975** in the Downloader app.

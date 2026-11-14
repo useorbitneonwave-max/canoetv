@@ -14,7 +14,7 @@ android {
         minSdk = 21
         targetSdk = 34
         versionCode = buildNumber
-        versionName = "1.0.$buildNumber"
+        versionName = "1.1.$buildNumber"
         // The GitHub repo this app updates itself from
         val repo = System.getenv("GITHUB_REPOSITORY") ?: "useorbitneonwave-max/canoetv"
         buildConfigField("String", "REPO", "\"$repo\"")

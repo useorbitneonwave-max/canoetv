@@ -33,6 +33,17 @@ class Store(context: Context) {
         saveFavs()
     }
 
+    // ---- extra channel lists switched on by the user ----
+    val enabledExtras: MutableSet<String> = HashSet(p.getStringSet("extras", emptySet()) ?: emptySet()).also { set ->
+        // Upgrading from 1.0.x: keep the list the user was already watching
+        if (!p.contains("extras")) {
+            val sid = p.getString("sourceId", null)
+            if (sid != null && sid != "freetv" && !sid.startsWith("custom:")) set.add(sid)
+            p.edit().putStringSet("extras", HashSet(set)).apply()
+        }
+    }
+    fun saveExtras() = p.edit().putStringSet("extras", HashSet(enabledExtras)).apply()
+
     // ---- renamed channels: url -> custom name ----
     private val renames: JSONObject = try { JSONObject(p.getString("renames", "{}") ?: "{}") } catch (e: Exception) { JSONObject() }
 
@@ -105,7 +116,7 @@ class Store(context: Context) {
         set(v) = p.edit().putString("lastUrl", v).apply()
 
     var sourceId: String
-        get() = p.getString("sourceId", "all") ?: "all"
+        get() = p.getString("sourceId", "freetv") ?: "freetv"
         set(v) = p.edit().putString("sourceId", v).apply()
 
     var hideDead: Boolean

@@ -142,5 +142,13 @@ class Epg(private val dir: File) {
         }
     }
 
+    fun hasAny() = data.isNotEmpty()
+
+    /** Forget downloaded guides so the next load fetches fresh copies. */
+    fun reset() {
+        attempted.clear()
+        dir.listFiles()?.forEach { it.delete() }
+    }
+
     fun shutdown() = pool.shutdownNow()
 }
