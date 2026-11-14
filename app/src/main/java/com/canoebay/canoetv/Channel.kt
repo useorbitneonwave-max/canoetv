@@ -98,14 +98,22 @@ object Lang {
             "magyar|hungar|korean|chinese|japanese|vietnam|thai|indonesia|filipino|tagalog|hebrew|kurd)"
     )
 
+    // Category names that are non-English-speaking countries (Free-TV groups channels by country)
+    private val foreignCountry = Regex("(?i)\\b(italy|poland|hungary|greece|russia|spain|ukraine|mongolia|emirates|germany|france|india|macedonia|finland|iran|croatia|chile|argentina|mexico|brazil|portugal|turkey|albania|serbia|bosnia|slovenia|slovakia|bulgaria|austria|switzerland|belgium|netherlands|sweden|norway|denmark|estonia|latvia|lithuania|belarus|georgia|armenia|azerbaijan|kazakhstan|uzbekistan|pakistan|afghanistan|iraq|syria|lebanon|jordan|egypt|morocco|algeria|tunisia|libya|saudi|qatar|kuwait|bahrain|oman|yemen|israel|china|japan|korea|taiwan|vietnam|thailand|indonesia|malaysia|cambodia|laos|myanmar|nepal|bangladesh|sri lanka|peru|colombia|venezuela|ecuador|bolivia|paraguay|uruguay|cuba|dominican|haiti|costa rica|panama|honduras|guatemala|salvador|nicaragua|luxembourg|andorra|monaco|montenegro|kosovo|moldova|romania|cyprus|iceland|faroe|czech|kyrgyz|tajik|turkmen|somalia|ethiopia|sudan|angola|mozambique|senegal|ivory|cameroon|congo|mali|niger\\b)")
+
+    private val langTag = Regex("\\(([A-Z]{2})\\)")
+
     // Writing systems other than Latin (Cyrillic, Greek, Arabic, Hebrew, Indian scripts, Thai, CJK, Korean)
     private val nonLatin = Regex("[\\u0370-\\u03FF\\u0400-\\u04FF\\u0590-\\u06FF\\u0900-\\u0DFF\\u0E00-\\u0E7F\\u3040-\\u30FF\\u3400-\\u9FFF\\uAC00-\\uD7AF]")
 
     fun isEnglish(c: Channel): Boolean {
         if (c.lang.isNotBlank()) return c.lang.contains("english", ignoreCase = true) || c.lang.equals("en", ignoreCase = true)
         if (c.group.contains("(EN)")) return true
+        // Categories tagged with another language code, like "News (ES)"
+        langTag.find(c.group)?.let { if (it.groupValues[1] != "EN") return false }
         if (nonLatin.containsMatchIn(c.name)) return false
         if (foreign.containsMatchIn(c.name) || foreign.containsMatchIn(c.group)) return false
+        if (foreignCountry.containsMatchIn(c.group)) return false
         if (c.country.isNotEmpty()) return c.country in english
         return true
     }
