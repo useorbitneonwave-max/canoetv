@@ -163,6 +163,11 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             .build()
         player = Players.build(this, loadControl)
         player.addListener(playerListener)
+        player.addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+            override fun onDroppedVideoFrames(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, droppedFrames: Int, elapsedMs: Long,
+            ) { statDropped += droppedFrames }
+        })
         playerView.player = player
         playerView.keepScreenOn = true
         playerView.setFullscreenButtonClickListener { full -> setFullscreen(full) }
@@ -1070,6 +1075,11 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         toggle("Skip dead channels automatically", "jump to the next channel when one fails", { store.autoSkip }) { store.autoSkip = it }
         row("Sleep timer", if (sleepAt > 0) "Stops in ${((sleepAt - System.currentTimeMillis()) / 60_000).coerceAtLeast(1)} min" else "Off") { showSleepTimer() }
 
+        toggle("Show connection info", "internet speed, picture quality and buffer on the video — helps find buffering causes", { store.showStats }) {
+            store.showStats = it
+            updateStats()
+        }
+
         header("TV guide")
         row("Refresh the TV guide", "Download fresh guide data now") {
             epg.reset(); refreshGuide(); toast("Downloading fresh guide data…")
@@ -1777,6 +1787,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         loading.visibility = View.VISIBLE
         playedOk = false
         reconnects = 0
+        statStalls = 0
+        statDropped = 0
         showBanner(ch)
         startSource(ch)
         refreshGuide()
@@ -1877,6 +1889,32 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private var reconnectPending = false
     private var soundOffFor: String? = null
 
+    // ---- connection info box
+    private var statDropped = 0
+    private var statStalls = 0
+    private val statsTick = object : Runnable {
+        override fun run() {
+            updateStats()
+        }
+    }
+
+    private fun updateStats() {
+        val v = findViewById<TextView>(R.id.stats)
+        handler.removeCallbacks(statsTick)
+        if (!store.showStats) { v.visibility = View.GONE; return }
+        val f = player.videoFormat
+        val speed = androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(this).bitrateEstimate
+        fun mbps(bits: Long) = String.format(java.util.Locale.US, "%.1f Mbps", bits / 1_000_000.0)
+        val picture = if (f != null && f.width > 0) "${f.width}×${f.height}" + (if (f.bitrate > 0) " · ${mbps(f.bitrate.toLong())}" else "") else "—"
+        v.text = "Internet (measured)  ${mbps(speed)}\n" +
+            "Picture              $picture\n" +
+            "Loaded ahead         ${player.totalBufferedDuration / 1000} s\n" +
+            "Stalls               $statStalls\n" +
+            "Dropped frames       $statDropped"
+        v.visibility = View.VISIBLE
+        handler.postDelayed(statsTick, 1_000)
+    }
+
     // ---- buffering & quality
     private var autoLowered = false            // quality lowered for this session after repeated buffering
     private val rebuffers = ArrayList<Long>()
@@ -1942,7 +1980,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         override fun onPlaybackStateChanged(state: Int) {
             loading.visibility = if (state == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
             bufferingSince = if (state == Player.STATE_BUFFERING) System.currentTimeMillis() else 0L
-            if (state == Player.STATE_BUFFERING && playedOk) noteRebuffer()
+            if (state == Player.STATE_BUFFERING && playedOk) { noteRebuffer(); statStalls++ }
             when (state) {
                 Player.STATE_READY -> {
                     overlay.visibility = View.GONE
@@ -2223,6 +2261,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         handler.postDelayed(watchdog, 5_000)
         handler.removeCallbacks(minuteTick)
         handler.postDelayed(minuteTick, 60_000)
+        updateStats()
         // Coming back to the app: jump to the live edge instead of resuming stale video
         if (section == Section.LIVE || section == Section.GUIDE) current?.let { reconnects = 0; startSource(it) }
         // Back from a movie: refresh "Continue watching"

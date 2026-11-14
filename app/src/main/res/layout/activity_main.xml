@@ -385,6 +385,20 @@
                     android:textColor="@color/muted"
                     android:textSize="15sp" />
 
+                <!-- Connection info (Settings → Show connection info) -->
+                <TextView
+                    android:id="@+id/stats"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="top|end"
+                    android:layout_margin="12dp"
+                    android:background="#CC000000"
+                    android:fontFamily="monospace"
+                    android:padding="8dp"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
                 <!-- Channel banner shown when switching channels or typing a number -->
                 <LinearLayout
                     android:id="@+id/banner"

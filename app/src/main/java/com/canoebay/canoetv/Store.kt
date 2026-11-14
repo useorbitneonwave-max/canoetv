@@ -224,6 +224,10 @@ class Store(context: Context) {
         get() = p.getString("playbackMode", "standard") ?: "standard"
         set(v) = p.edit().putString("playbackMode", v).apply()
 
+    var showStats: Boolean
+        get() = p.getBoolean("showStats", false)
+        set(v) = p.edit().putBoolean("showStats", v).apply()
+
     var welcomed: Boolean
         get() = p.getBoolean("welcomed", false)
         set(v) = p.edit().putBoolean("welcomed", v).apply()
