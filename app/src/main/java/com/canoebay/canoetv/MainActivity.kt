@@ -344,14 +344,16 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
         guideState = GuideState(this)
         guideRuler.state = guideState
+        guidePreview = findViewById(R.id.guidePreview)
+        findViewById<View>(R.id.guideListBtn).setOnClickListener { showListPicker() }
         guideAdapter = GuideAdapter(guideState, this)
         guideList.layoutManager = LinearLayoutManager(this)
         guideList.adapter = guideAdapter
         guideList.itemAnimator = null
 
-        findViewById<View>(R.id.chipGuide).setOnClickListener { guideFilter = "guide"; refreshGuideScreen() }
-        findViewById<View>(R.id.chipFav).setOnClickListener { guideFilter = "fav"; refreshGuideScreen() }
-        findViewById<View>(R.id.chipAll).setOnClickListener { guideFilter = "all"; refreshGuideScreen() }
+        findViewById<View>(R.id.chipGuide).setOnClickListener { guideFilter = "guide"; refreshGuideScreen(); focusGuideRow() }
+        findViewById<View>(R.id.chipFav).setOnClickListener { guideFilter = "fav"; refreshGuideScreen(); focusGuideRow() }
+        findViewById<View>(R.id.chipAll).setOnClickListener { guideFilter = "all"; refreshGuideScreen(); focusGuideRow() }
         findViewById<View>(R.id.guideEarlier).setOnClickListener { moveGuide(-3600_000L) }
         findViewById<View>(R.id.guideLater).setOnClickListener { moveGuide(3600_000L) }
         findViewById<View>(R.id.guideNow).setOnClickListener {
@@ -672,11 +674,13 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         settingsView.visibility = if (s == Section.SETTINGS) View.VISIBLE else View.GONE
         navItems.forEachIndexed { i, v -> v.isSelected = i == s.ordinal }
 
-        if (prev == Section.LIVE && s != Section.LIVE) {
-            player.pause()
-            banner.visibility = View.GONE
-        }
-        if (s == Section.LIVE && prev != Section.LIVE && resume) current?.let { reconnects = 0; startSource(it) }
+        val prevShowsVideo = prev == Section.LIVE || prev == Section.GUIDE
+        val showsVideo = s == Section.LIVE || s == Section.GUIDE
+        if (s == Section.GUIDE) attachPlayer(guidePreview) else attachPlayer(playerView)
+        if (prev == Section.LIVE && s != Section.LIVE) banner.visibility = View.GONE
+        if (prevShowsVideo && !showsVideo) player.pause()
+        if (showsVideo && !prevShowsVideo && resume) current?.let { reconnects = 0; startSource(it) }
+        if (s != Section.GUIDE) handler.removeCallbacks(previewRunnable)
 
         when (s) {
             Section.HOME -> {
@@ -686,7 +690,11 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             Section.SEARCH -> searchBox.requestFocus()
             Section.LIVE -> list.requestFocus()
             Section.MOVIES -> { loadMovies(); moviesList.post { moviesList.getChildAt(1)?.requestFocus() } }
-            Section.GUIDE -> { refreshGuideScreen(); guideList.post { guideList.getChildAt(0)?.requestFocus() } }
+            Section.GUIDE -> {
+                refreshGuideScreen()
+                if (current == null) showPreviewMsg("Move through the guide to preview a channel")
+                focusGuideRow()
+            }
             Section.SETTINGS -> { buildSettings(); settingsList.post { settingsList.getChildAt(1)?.requestFocus() } }
         }
         updateBack()
@@ -698,8 +706,17 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             askPin("Enter your PIN to watch ${ch.name}") { unlocked = true; adapter.notifyDataSetChanged(); watch(ch) }
             return
         }
+        val alreadyPlaying = ch.url == current?.url && player.playbackState != Player.STATE_IDLE
         if (section != Section.LIVE) showSection(Section.LIVE, resume = false)
-        play(ch, auto = false)
+        if (alreadyPlaying) {
+            store.lastUrl = ch.url
+            store.addRecent(ch.url)
+            adapter.setPlaying(ch.url)
+            player.play()
+            showBanner(ch)
+        } else {
+            play(ch, auto = false)
+        }
         setFullscreen(true)
     }
 
@@ -784,8 +801,14 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         val list = when (guideFilter) {
             "fav" -> store.favOrder.mapNotNull { byUrl[it] }
             "all" -> visible
-            else -> visible.filter { epg.upcoming(it, 1).isNotEmpty() }
+            "guide" -> visible.filter { epg.upcoming(it, 1).isNotEmpty() }
+            else -> visible.filter { "group:${it.group}" == guideFilter }
         }
+        buildGuideGroupChips()
+        val box = findViewById<LinearLayout>(R.id.guideGroupChips)
+        for (i in 0 until box.childCount) box.getChildAt(i).isSelected = box.getChildAt(i).tag == guideFilter
+        findViewById<TextView>(R.id.guideListBtn).text =
+            "📺 " + (sources.firstOrNull { it.id == loadedSourceId }?.name?.substringBefore(" —")?.substringBefore(" (") ?: "Channel list") + " ▾"
         findViewById<View>(R.id.chipGuide).isSelected = guideFilter == "guide"
         findViewById<View>(R.id.chipFav).isSelected = guideFilter == "fav"
         findViewById<View>(R.id.chipAll).isSelected = guideFilter == "all"
@@ -802,6 +825,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     private fun invalidateGuide() {
         guideRuler.invalidate()
+        findViewById<TextView>(R.id.guideDay).text =
+            java.text.SimpleDateFormat("EEE d MMM, h:mm a", java.util.Locale.getDefault()).format(java.util.Date())
         for (i in 0 until guideList.childCount) {
             (guideList.getChildViewHolder(guideList.getChildAt(i)) as? GuideAdapter.VH)?.strip?.invalidate()
         }
@@ -833,6 +858,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     }
 
     override fun guideCursorMoved() {
+        guideFocused?.let { updateGuideInfo(it) }
         val span = (guideRuler.width / guideState.pxPerMs).toLong().coerceAtLeast(3600_000L)
         if (guideState.cursor < guideState.left) guideState.left = GuideState.halfHour(guideState.cursor)
         if (guideState.cursor > guideState.left + span * 85 / 100) {
@@ -844,6 +870,19 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     override fun guideTap(ch: Channel, prog: Epg.Prog?) {
         val now = System.currentTimeMillis()
+        // On a TV the highlighted row is already picked, so OK goes straight to full screen
+        val alreadyPicked = ch.url == guideFocused?.url && (ch.url == current?.url || isTv())
+        if (!alreadyPicked) {
+            // Touch screens: the first tap picks the channel and previews it
+            guideAdapter.selectedUrl = ch.url
+            if (prog != null) guideState.cursor = maxOf(prog.start, now)
+            guideFocused = ch
+            updateGuideInfo(ch, prog)
+            invalidateGuide()
+            handler.removeCallbacks(previewRunnable)
+            previewChannel(ch)
+            return
+        }
         if (prog == null || (prog.start <= now && now < prog.stop)) { watch(ch); return }
         AlertDialog.Builder(this)
             .setTitle(prog.title)
@@ -854,6 +893,111 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     }
 
     override fun guideOptions(ch: Channel) = showChannelOptions(ch)
+
+    // ---- Guide preview: highlight a channel to preview it, OK to watch full screen
+
+    private lateinit var guidePreview: PlayerView
+    private var guideFocused: Channel? = null
+    private var guideGroupsFor: String? = null
+    private val previewRunnable = Runnable { guideFocused?.let { previewChannel(it) } }
+
+    /** The main player can show in the Live TV screen or in the guide's preview window. */
+    private fun attachPlayer(to: PlayerView) {
+        if (to.player === player) return
+        playerView.player = null
+        guidePreview.player = null
+        to.player = player
+    }
+
+    /** Starts a channel in the preview window without adding it to "recently watched". */
+    private fun previewChannel(ch: Channel) {
+        if (section != Section.GUIDE) return
+        if (needsPin(ch)) {
+            player.stop()
+            showPreviewMsg("🔒 Locked — press OK to enter your PIN")
+            return
+        }
+        if (ch.url == current?.url && player.playbackState != Player.STATE_IDLE) return
+        handler.removeCallbacks(skipRunnable)
+        current = ch
+        nowPlaying.text = ch.name
+        playedOk = false
+        reconnects = 0
+        showPreviewMsg(null)
+        startSource(ch)
+    }
+
+    private fun showPreviewMsg(msg: String?) {
+        val v = findViewById<TextView>(R.id.guidePreviewMsg)
+        v.text = msg ?: ""
+        v.visibility = if (msg == null) View.GONE else View.VISIBLE
+    }
+
+    /** Fills the details panel for a channel and the show under the guide's cursor. */
+    private fun updateGuideInfo(ch: Channel, progIn: Epg.Prog? = null) {
+        val prog = progIn ?: epg.upcoming(ch, 80).firstOrNull { it.start <= guideState.cursor && guideState.cursor < it.stop } ?: epg.now(ch)
+        val now = System.currentTimeMillis()
+        findViewById<TextView>(R.id.guideInfoChannel).text = "${ch.number}  ·  ${ch.name.uppercase()}"
+        findViewById<TextView>(R.id.guideInfoTitle).text = prog?.title ?: ch.name
+        val timeView = findViewById<TextView>(R.id.guideInfoTime)
+        val bar = findViewById<ProgressBar>(R.id.guideInfoProgress)
+        if (prog != null) {
+            val airing = prog.start <= now && now < prog.stop
+            val extra = when {
+                airing -> "  ·  ${((prog.stop - now) / 60_000).coerceAtLeast(1)} min left"
+                prog.start > now -> "  ·  starts in ${((prog.start - now) / 60_000).coerceAtLeast(1)} min"
+                else -> "  ·  ended"
+            }
+            timeView.text = "${hhmm(prog.start)} – ${hhmm(prog.stop)}$extra"
+            bar.visibility = if (airing) View.VISIBLE else View.GONE
+            bar.progress = Look.progress(prog)
+            findViewById<TextView>(R.id.guideInfoDesc).text = prog.desc.ifEmpty { ch.group }
+        } else {
+            timeView.text = ch.group
+            bar.visibility = View.GONE
+            findViewById<TextView>(R.id.guideInfoDesc).text = "No guide information for this channel."
+        }
+        findViewById<View>(R.id.guideLiveBadge).visibility = if (prog == null || prog.start <= now) View.VISIBLE else View.GONE
+    }
+
+    override fun guideRowFocused(ch: Channel) {
+        guideFocused = ch
+        updateGuideInfo(ch)
+        // Wait a moment so scrolling quickly through the guide doesn't start every channel
+        handler.removeCallbacks(previewRunnable)
+        handler.postDelayed(previewRunnable, 700)
+    }
+
+    /** Category chips under the preview, built from the channel list's own categories. */
+    private fun buildGuideGroupChips() {
+        if (guideGroupsFor == loadedSourceId && guideGroupsFor != null) return
+        guideGroupsFor = loadedSourceId
+        val box = findViewById<LinearLayout>(R.id.guideGroupChips)
+        box.removeAllViews()
+        val groups = channels.filter { it.group !in store.hiddenGroups }
+            .groupingBy { it.group }.eachCount().entries.sortedByDescending { it.value }.take(14).map { it.key }
+        for (g in groups) {
+            val chip = layoutInflater.inflate(R.layout.chip, box, false) as TextView
+            chip.text = g
+            chip.tag = "group:$g"
+            chip.setOnClickListener { guideFilter = "group:$g"; refreshGuideScreen(); focusGuideRow() }
+            box.addView(chip)
+        }
+    }
+
+    private fun focusGuideRow() {
+        guideList.post {
+            val idx = guideAdapter.items.indexOfFirst { it.url == current?.url }
+            if (idx >= 0) {
+                guideList.scrollToPosition(idx)
+                guideList.post { guideList.findViewHolderForAdapterPosition(idx)?.itemView?.requestFocus() }
+            } else {
+                guideList.getChildAt(0)?.requestFocus()
+            }
+        }
+    }
+
+
 
     // ---- Settings
 
@@ -1392,6 +1536,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             }
             runOnUiThread {
                 if (token != loadToken) return@runOnUiThread
+                guideGroupsFor = null
                 guideCatalog.clear()
                 guideCatalog.addAll(guides)
                 updateSourceButton()
@@ -1755,7 +1900,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
-            if (isPlaying) overlay.visibility = View.GONE
+            if (isPlaying) { overlay.visibility = View.GONE; if (section == Section.GUIDE) showPreviewMsg(null) }
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -1769,6 +1914,10 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             }
             store.setHealth(ch.url, false)
             adapter.refresh(ch.url)
+            if (section == Section.GUIDE) {
+                showPreviewMsg("This channel is offline or blocked right now")
+                return
+            }
             val willSkip = store.autoSkip && skipCount < 15 && filtered.size > 1
             showMessage(
                 "Couldn't play ${ch.name}\n${reason(error)}" + if (willSkip) "\n\nSkipping to the next channel…" else "",
@@ -1995,7 +2144,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         handler.removeCallbacks(minuteTick)
         handler.postDelayed(minuteTick, 60_000)
         // Coming back to the app: jump to the live edge instead of resuming stale video
-        if (section == Section.LIVE) current?.let { reconnects = 0; startSource(it) }
+        if (section == Section.LIVE || section == Section.GUIDE) current?.let { reconnects = 0; startSource(it) }
         // Back from a movie: refresh "Continue watching"
         if (section == Section.MOVIES) renderMovies()
     }

@@ -106,7 +106,12 @@ class ProgramStripView @JvmOverloads constructor(
             val x2 = min(w, (p.stop - s.left) * s.pxPerMs) - gap
             if (x2 - x1 < 4 * d) continue
             val airing = p.start <= now && now < p.stop
-            fill.color = if (airing) baseColor else blend(baseColor, 0xFF15171D.toInt(), 0.45f)
+            val picked = rowFocused && p.start <= s.cursor && s.cursor < p.stop
+            fill.color = when {
+                picked -> 0xFF2FB89B.toInt()
+                airing -> baseColor
+                else -> blend(baseColor, 0xFF15171D.toInt(), 0.45f)
+            }
             rect.set(x1, gap, x2, h - gap)
             canvas.drawRoundRect(rect, radius, radius, fill)
             if (airing) {
@@ -115,9 +120,7 @@ class ProgramStripView @JvmOverloads constructor(
                 val px = min(x2, (now - s.left) * s.pxPerMs)
                 if (px > x1) canvas.drawRect(x1, h - gap - 3 * d, px, h - gap, fill)
             }
-            if (rowFocused && p.start <= s.cursor && s.cursor < p.stop) {
-                canvas.drawRoundRect(rect, radius, radius, stroke)
-            }
+            if (picked) canvas.drawRoundRect(rect, radius, radius, stroke)
             val avail = x2 - x1 - 2 * pad
             if (avail > 12 * d) {
                 val time = TextUtils.ellipsize(timeFmt.format(java.util.Date(p.start)), timePaint, avail, TextUtils.TruncateAt.END)
@@ -174,6 +177,7 @@ interface GuideHost {
     fun guideDrag(dxPx: Float)
     fun guideCursorMoved()
     fun guideOptions(ch: Channel)
+    fun guideRowFocused(ch: Channel)
 }
 
 class GuideAdapter(private val state: GuideState, private val host: GuideHost) :
@@ -181,6 +185,9 @@ class GuideAdapter(private val state: GuideState, private val host: GuideHost) :
 
     var items: List<Channel> = emptyList()
         private set
+
+    /** The channel picked by touch (on a TV the focused row is highlighted instead). */
+    var selectedUrl: String? = null
 
     fun submit(list: List<Channel>) {
         items = list
@@ -224,14 +231,18 @@ class GuideAdapter(private val state: GuideState, private val host: GuideHost) :
         h.strip.state = state
         h.strip.progs = host.guideProgs(ch)
         h.strip.baseColor = Look.palette[position % Look.palette.size]
-        h.strip.rowFocused = h.itemView.hasFocus()
+        h.strip.rowFocused = h.itemView.hasFocus() || ch.url == selectedUrl
         h.strip.listener = object : ProgramStripView.Listener {
             override fun onDrag(dxPx: Float) = host.guideDrag(dxPx)
             override fun onTap(prog: Epg.Prog?) = host.guideTap(ch, prog)
         }
         h.strip.invalidate()
 
-        h.itemView.setOnFocusChangeListener { _, has -> h.strip.rowFocused = has; h.strip.invalidate() }
+        h.itemView.setOnFocusChangeListener { _, has ->
+            h.strip.rowFocused = has || ch.url == selectedUrl
+            h.strip.invalidate()
+            if (has) host.guideRowFocused(ch)
+        }
         h.itemView.setOnClickListener { host.guideTap(ch, h.strip.progAt(state.cursor)) }
         h.itemView.setOnLongClickListener { host.guideOptions(ch); true }
         h.itemView.setOnKeyListener { _, code, ev ->
