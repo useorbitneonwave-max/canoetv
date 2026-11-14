@@ -395,7 +395,9 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         val mp = ViewGroup.LayoutParams.MATCH_PARENT
         val wc = ViewGroup.LayoutParams.WRAP_CONTENT
         val dens = resources.displayMetrics.density
-        navBar.visibility = if (fullscreen || inPip) View.GONE else View.VISIBLE
+        val bottomBarMode = !isTv() && resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+        val hideForGuide = section == Section.GUIDE && !bottomBarMode
+        navBar.visibility = if (fullscreen || inPip || hideForGuide) View.GONE else View.VISIBLE
         val labels = listOf("🏠" to "Home", "🔍" to "Search", "📺" to "Live TV", "🎬" to "Movies", "🗓" to "Guide", "⚙" to "Settings")
         val bottomBar = !isTv() && resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
         if (bottomBar) {
@@ -700,6 +702,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         settingsView.visibility = if (s == Section.SETTINGS) View.VISIBLE else View.GONE
         // The guide is part of Live TV now, so Live TV stays highlighted for both views
         navItems.forEachIndexed { i, v -> v.isSelected = i == s.ordinal || (s == Section.GUIDE && i == Section.LIVE.ordinal) }
+        applyShell()
         if (s != Section.LIVE) findViewById<View>(R.id.surfPanel).visibility = View.GONE
 
         val prevShowsVideo = prev == Section.LIVE || prev == Section.GUIDE
@@ -996,6 +999,14 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             findViewById<TextView>(R.id.guideInfoDesc).text = "No guide information for this channel."
         }
         findViewById<View>(R.id.guideLiveBadge).visibility = if (prog == null || prog.start <= now) View.VISIBLE else View.GONE
+    }
+
+    override fun guideFocusRow(position: Int) {
+        val vh = guideList.findViewHolderForAdapterPosition(position)
+        if (vh != null) { vh.itemView.requestFocus(); return }
+        // The row isn't on screen yet: bring it in, then focus it
+        guideList.scrollToPosition(position)
+        guideList.post { guideList.findViewHolderForAdapterPosition(position)?.itemView?.requestFocus() }
     }
 
     override fun guideRowFocused(ch: Channel) {

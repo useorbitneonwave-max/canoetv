@@ -178,6 +178,7 @@ interface GuideHost {
     fun guideCursorMoved()
     fun guideOptions(ch: Channel)
     fun guideRowFocused(ch: Channel)
+    fun guideFocusRow(position: Int)
 }
 
 class GuideAdapter(private val state: GuideState, private val host: GuideHost) :
@@ -248,7 +249,16 @@ class GuideAdapter(private val state: GuideState, private val host: GuideHost) :
         h.itemView.setOnKeyListener { _, code, ev ->
             if (ev.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
             val sel = h.strip.progAt(state.cursor)
+            val pos = h.bindingAdapterPosition
             when (code) {
+                // Up/down always move exactly one channel and never jump out of the guide
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    if (pos != RecyclerView.NO_POSITION && pos + 1 < itemCount) host.guideFocusRow(pos + 1)
+                    true
+                }
+                KeyEvent.KEYCODE_DPAD_UP -> {
+                    if (pos > 0) { host.guideFocusRow(pos - 1); true } else false // top row: up goes to the buttons
+                }
                 KeyEvent.KEYCODE_DPAD_RIGHT -> {
                     state.cursor = sel?.stop ?: (state.cursor + GuideState.HALF_HOUR)
                     host.guideCursorMoved(); true

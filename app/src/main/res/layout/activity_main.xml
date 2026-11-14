@@ -277,7 +277,7 @@
                         android:layout_height="wrap_content"
                         android:singleLine="true"
                         android:ellipsize="end"
-                        android:text="OK: watch full screen   ·   ← → shows   ·   ↑ ↓ channels"
+                        android:text="OK: watch full screen   ·   ← → shows   ·   ↑ ↓ channels   ·   Back: menu"
                         android:textColor="#808A91A3"
                         android:textSize="12sp" />
                 </LinearLayout>
