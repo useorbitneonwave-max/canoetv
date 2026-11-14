@@ -241,7 +241,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                 "CanoeTV is a TV player. It doesn't host, sell or own any channels — it plays free streams " +
                     "that broadcasters make publicly available, and playlists you add yourself.\n\n" +
                     "Channel lists\n• Free-TV (github.com/Free-TV/IPTV) — built in\n" +
-                    "• iptv-org (github.com/iptv-org/iptv) — optional, switched on in Settings\n\n" +
+                    "• iptv-org (github.com/iptv-org/iptv) — built in\n\n" +
                     "Movies\n• Public-domain films from the Internet Archive (archive.org)\n\n" +
                     "TV guide data\n• epgshare01.online, and guide links named by your playlists\n\n" +
                     "Made with\n• AndroidX Media3 (Apache 2.0)\n• Coil (Apache 2.0)\n\n" +
@@ -734,8 +734,6 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         }
 
         header("Channels")
-        val extras = Sources.extras().filter { it.id in store.enabledExtras }.map { it.name }
-        row("Channel lists", (listOf("Free-TV") + extras).joinToString(" · ")) { showExtrasDialog() }
         row("Add your own playlist", "An M3U link from a provider you subscribe to") { showAddDialog() }
         row("Remove one of your playlists", "${store.customSources().size} added") { showRemoveDialog() }
         row("Show / hide categories", "${store.hiddenGroups.size} hidden") { showHideCategories() }
@@ -759,42 +757,6 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         row("Check for updates", "You have version ${BuildConfig.VERSION_NAME}") { checkForUpdates(manual = true) }
         row("About CanoeTV & legal", "Where channels come from, credits, remote tips") { showAbout() }
         row("Privacy policy", "What CanoeTV stores and sends") { showPrivacy() }
-    }
-
-    private fun showExtrasDialog() {
-        AlertDialog.Builder(this)
-            .setTitle("Extra channel lists")
-            .setMessage(
-                "Free-TV is built in. You can also switch on lists from iptv-org, a community project that " +
-                    "collects links to publicly available streams from around the world.\n\n" +
-                    "CanoeTV doesn't host these streams or check who owns the rights to them, and some may not " +
-                    "be allowed where you live. Only watch channels you're allowed to watch."
-            )
-            .setPositiveButton("Choose lists") { _, _ -> chooseExtras() }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun chooseExtras() {
-        val all = Sources.extras()
-        val checked = BooleanArray(all.size) { all[it].id in store.enabledExtras }
-        AlertDialog.Builder(this)
-            .setTitle("Switch on lists")
-            .setMultiChoiceItems(all.map { it.name }.toTypedArray(), checked) { _, i, on -> checked[i] = on }
-            .setPositiveButton("Save") { _, _ ->
-                store.enabledExtras.clear()
-                all.forEachIndexed { i, src -> if (checked[i]) store.enabledExtras.add(src.id) }
-                store.saveExtras()
-                val keep = loadedSourceId?.takeIf { id ->
-                    id == "freetv" || id.startsWith("custom:") || id in store.enabledExtras
-                } ?: "freetv"
-                if (keep != loadedSourceId) loadedSourceId = null
-                setupSources(selectId = keep)
-                toast("Pick a list from the menu at the top of Live TV")
-                if (section == Section.SETTINGS) buildSettings()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
     }
 
     // ------------------------------------------------------------------ TV guide
@@ -1123,7 +1085,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     // ------------------------------------------------------------------ sources & loading
 
     private fun setupSources(selectId: String) {
-        sources = Sources.core() + Sources.extras().filter { it.id in store.enabledExtras } + store.customSources()
+        sources = Sources.extras().take(1) + Sources.core() + Sources.extras().drop(1) + store.customSources()
         val labels = sources.map { if (it.custom) "📁 ${it.name}" else it.name }
         sourceSpinner.adapter = ArrayAdapter(this, R.layout.spinner_item, labels).also {
             it.setDropDownViewResource(R.layout.spinner_item)

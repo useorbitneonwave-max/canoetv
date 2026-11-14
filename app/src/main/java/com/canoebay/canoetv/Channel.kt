@@ -24,10 +24,7 @@ object Sources {
         Source("freetv", "Free-TV — free, curated channels", listOf(FREE_TV)),
     )
 
-    /**
-     * Extra community lists (iptv-org). Off by default: the user switches them on in
-     * Settings → Channel lists, after a short notice about where the links come from.
-     */
+    /** Community lists from iptv-org, all built in. */
     fun extras(): List<Source> = listOf(
         Source("all", "All free channels (Free-TV + iptv-org)", listOf(FREE_TV, "$IPTV_ORG/index.m3u")),
         Source("iptvorg", "iptv-org — every country", listOf("$IPTV_ORG/index.m3u")),

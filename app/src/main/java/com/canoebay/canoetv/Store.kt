@@ -158,7 +158,7 @@ class Store(context: Context) {
         set(v) = p.edit().putString("lastUrl", v).apply()
 
     var sourceId: String
-        get() = p.getString("sourceId", "freetv") ?: "freetv"
+        get() = p.getString("sourceId", "all") ?: "all"
         set(v) = p.edit().putString("sourceId", v).apply()
 
     var hideDead: Boolean
