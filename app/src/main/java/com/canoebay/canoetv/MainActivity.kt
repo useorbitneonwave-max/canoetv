@@ -910,6 +910,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     /** The main player can show in the Live TV screen or in the guide's preview window. */
     private fun attachPlayer(to: PlayerView) {
+        // Only the screen that's showing keeps a video surface, so no old frame can linger on top
+        guidePreview.visibility = if (to === guidePreview) View.VISIBLE else View.INVISIBLE
         if (to.player === player) return
         playerView.player = null
         guidePreview.player = null
