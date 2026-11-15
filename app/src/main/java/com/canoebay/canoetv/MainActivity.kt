@@ -858,9 +858,24 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost
         val verb = if (first.provider.kind == "flatrate") "Watch on" else "Free on"
         play.alpha = 1f
         play.text = "▶  $verb ${first.app.name}" + if (options.size > 1) "  (+${options.size - 1})" else ""
-        fun go(o: Option) {
+        // Look up each service's own link for this movie now, so Play can open it directly
+        fun fetchLinks() {
+            try {
+                tmdbLinks[m.id] = Tmdb.parseWatchLinks(
+                    Tmdb.cached(cacheDir, Tmdb.watchPageUrl(m.id), 12 * 3600_000L) { download(it) })
+            } catch (e: Exception) { tmdbLinks[m.id] = emptyMap() }
+        }
+        if (tmdbLinks[m.id] == null) moviePool.execute { fetchLinks() }
+        fun open(o: Option) {
+            val link = tmdbLinks[m.id]?.get(o.app.name)
+            if (link != null && openDeepLink(o.app, link)) return
             openApp(o.app)
             toast("In ${o.app.name}, search for “${m.title}”")
+        }
+        fun go(o: Option) {
+            if (tmdbLinks[m.id] != null) { open(o); return }
+            toast("Opening ${o.app.name}…")
+            moviePool.execute { fetchLinks(); runOnUiThread { open(o) } }
         }
         play.setOnClickListener {
             if (options.size == 1) { go(first); return@setOnClickListener }
@@ -871,11 +886,40 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost
         }
     }
 
+    private val tmdbLinks = ConcurrentHashMap<Int, Map<String, String>>()
+
+    /** Opens the movie's page inside the service's app. False if the app couldn't take the link. */
+    private fun openDeepLink(app: AppEntry, url: String): Boolean {
+        val pkg = MyApps.installed(this, app) ?: return false
+        val uri = Uri.parse(url.replace("http://", "https://"))
+        val tries = ArrayList<Intent>()
+        if (app.name == "Netflix") {
+            // Netflix's TV app wants its own form of the link
+            val id = Regex("""/title/(\d+)""").find(url)?.groupValues?.get(1)
+            if (id != null) tries.add(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.netflix.com/title/$id")).putExtra("source", "30"))
+        }
+        tries.add(Intent(Intent.ACTION_VIEW, uri))
+        for (i in tries) {
+            try {
+                startActivity(i.setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return true
+            } catch (e: Exception) { }
+        }
+        return false
+    }
+
     private fun openTrailer(key: String) {
-        val tries = listOf(
-            Intent(Intent.ACTION_VIEW, Uri.parse("vnd.youtube:$key")),
-            Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/watch?v=$key")),
-        )
+        val web = "https://www.youtube.com/watch?v=$key"
+        val tries = ArrayList<Intent>()
+        // Hand the exact video to whichever YouTube app this device has (TV, Fire TV or phone)
+        for (pkg in listOf("com.google.android.youtube.tv", "com.amazon.firetv.youtube", "com.google.android.youtube")) {
+            if (try { packageManager.getPackageInfo(pkg, 0); true } catch (e: Exception) { false }) {
+                tries.add(Intent(Intent.ACTION_VIEW, Uri.parse(web)).setPackage(pkg).putExtra("force_fullscreen", true))
+                tries.add(Intent(Intent.ACTION_VIEW, Uri.parse("vnd.youtube:$key")).setPackage(pkg))
+            }
+        }
+        tries.add(Intent(Intent.ACTION_VIEW, Uri.parse("vnd.youtube:$key")))
+        tries.add(Intent(Intent.ACTION_VIEW, Uri.parse(web)))
         for (i in tries) {
             try { startActivity(i); return } catch (e: ActivityNotFoundException) { }
         }

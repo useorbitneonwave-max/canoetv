@@ -198,6 +198,42 @@ object Tmdb {
         return MyApps.all.firstOrNull { it.name == name }
     }
 
+    /** TMDB's "where to watch" page; its links (from JustWatch) go straight to the movie on each service. */
+    fun watchPageUrl(id: Int) = "https://www.themoviedb.org/movie/$id/watch?locale=$REGION"
+
+    private val clickRe = Regex("""https?://click\.justwatch\.com/a\?[^"'\s<>]+""")
+
+    /** App name -> the movie's own page on that service (e.g. netflix.com/title/123). */
+    fun parseWatchLinks(html: String): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        for (m in clickRe.findAll(html)) {
+            val raw = m.value.replace("&amp;", "&")
+            val r = raw.substringAfter("r=", "").substringBefore('&')
+            if (r.isEmpty()) continue
+            val target = try { java.net.URLDecoder.decode(r, "UTF-8") } catch (e: Exception) { continue }
+            val app = appForUrl(target) ?: continue
+            if (app !in out) out[app] = target
+        }
+        return out
+    }
+
+    fun appForUrl(url: String): String? {
+        val u = url.lowercase()
+        return when {
+            "netflix.com" in u -> "Netflix"
+            "primevideo.com" in u || "amazon." in u -> "Prime Video"
+            "disneyplus.com" in u -> "Disney+"
+            "crave.ca" in u -> "Crave"
+            "tubitv.com" in u || "tubi.tv" in u -> "Tubi"
+            "pluto.tv" in u -> "Pluto TV"
+            "plex.tv" in u -> "Plex"
+            "paramountplus.com" in u -> "Paramount+"
+            "gem.cbc.ca" in u || "cbc.ca/gem" in u -> "CBC Gem"
+            "youtube.com" in u -> "YouTube"
+            else -> null
+        }
+    }
+
     /** Disk cache, so the Movies screen opens instantly. */
     fun cached(dir: File, url: String, maxAgeMs: Long, fetch: (String) -> String): String {
         val keyless = url.replace(Regex("api_key=[^&]*"), "")
