@@ -18,6 +18,9 @@ android {
         // The GitHub repo this app updates itself from
         val repo = System.getenv("GITHUB_REPOSITORY") ?: "useorbitneonwave-max/canoetv"
         buildConfigField("String", "REPO", "\"$repo\"")
+        // Your own TMDB key, from the TMDB_KEY secret in GitHub (never written in the code)
+        val tmdbKey = (System.getenv("TMDB_KEY") ?: "").filter { it.isLetterOrDigit() }
+        buildConfigField("String", "TMDB_KEY", "\"$tmdbKey\"")
     }
 
     buildFeatures {

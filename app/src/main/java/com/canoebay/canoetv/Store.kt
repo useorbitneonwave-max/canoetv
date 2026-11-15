@@ -281,7 +281,7 @@ class Store(context: Context) {
 
     /** Your own TMDB API key. Kept only on this device (never in the app's code or backups). */
     var tmdbKey: String
-        get() = p.getString("tmdbKey", "") ?: ""
+        get() = (p.getString("tmdbKey", null) ?: BuildConfig.TMDB_KEY)
         set(v) = p.edit().putString("tmdbKey", v.trim()).apply()
 
     private val tmdbList: JSONArray = try { JSONArray(p.getString("tmdbList", "[]")) } catch (e: Exception) { JSONArray() }
