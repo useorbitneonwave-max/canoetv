@@ -537,7 +537,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             .setTitle("Welcome to CanoeTV")
             .setMessage(
                 "Free live TV from around the world, a TV guide, and free classic movies.\n\n" +
-                    "• Home — what you watched last, your favourites and what's on now\n" +
+                    "• Home — what you watched last, your favourites, sports on now and what's on now\n" +
                     "• Live TV — every channel, with a list on the side\n" +
                     "• Movies — free 24/7 movie channels, free movie apps and classic films\n" +
                     "• TV Guide — what's on now and next\n\n" +
@@ -604,6 +604,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private lateinit var moviesTop: MoviesAdapter
     private lateinit var movieChannelsAdapter: HomeAdapter
     @Volatile private var movieChannels: List<Channel> = emptyList()
+    @Volatile private var sportsChannels: List<Channel> = emptyList()
     private var movieChannelsLoadedAt = 0L
     private var movieChannelsLoading = false
     private var movieChannelsFailed = false
@@ -637,19 +638,21 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                 }
             }
             val picked = MovieChannels.pick(all, englishOnly)
-            picked.forEach { c -> store.renamed(c.url)?.let { c.name = it } }
+            val sports = SportsChannels.pick(all, emptyList(), englishOnly)
+            (picked + sports).forEach { c -> store.renamed(c.url)?.let { c.name = it } }
             runOnUiThread {
                 movieChannelsLoading = false
                 movieChannels = picked
-                movieByUrl = picked.associateBy { it.url }
+                sportsChannels = sports
+                movieByUrl = (picked + sports).associateBy { it.url }
                 movieChannelsFailed = picked.isEmpty()
                 if (picked.isNotEmpty()) movieChannelsLoadedAt = System.currentTimeMillis()
                 renderMovies()
                 homeDirty = true
                 if (section == Section.HOME) refreshHome()
-                // Which movie is on now, from each service's own guide
-                val ids = picked.mapNotNull { c -> Epg.norm(c.tvgId).takeIf { it.isNotEmpty() } }.toHashSet()
-                val names = picked.mapNotNull { c -> Epg.nameKey(c.name).takeIf { it.isNotEmpty() } }.toHashSet()
+                // Which movie or game is on now, from each service's own guide
+                val ids = (picked + sports).mapNotNull { c -> Epg.norm(c.tvgId).takeIf { it.isNotEmpty() } }.toHashSet()
+                val names = (picked + sports).mapNotNull { c -> Epg.nameKey(c.name).takeIf { it.isNotEmpty() } }.toHashSet()
                 val urls = guides.filter { !it.contains("epgshare01") }.distinct()
                 if (urls.isNotEmpty()) epg.load(urls, ids, names, ::downloadToFile, tag = "movies:") {
                     runOnUiThread {
@@ -881,6 +884,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     // ---- Home
 
     private val ROW_ON_NOW = "On now"
+    private val ROW_SPORTS = "🏆 Sports on now"
 
     private fun refreshHome() {
         homeDirty = false
@@ -904,6 +908,9 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         items.add(HomeItem.Apps("My apps", myAppsInOrder()))
         row("Continue watching", store.recents.mapNotNull { anyChannel(it) }.filter { it.url != heroCh?.url }.take(15))
         row("My List", store.favOrder.mapNotNull { anyChannel(it) })
+        // Sports channels from the free services, plus any in the list you're watching
+        row(ROW_SPORTS, SportsChannels.pick(sportsChannels, visible, englishOnly = false).filter { store.health(it.url) != false }
+            .sortedByDescending { SportsChannels.rank(it, epg.now(it)) }.take(40))
         row("🎬 Movie channels", movieChannels.filter { store.health(it.url) != false }
             .sortedByDescending { epg.now(it) != null }.take(30))
         row(ROW_ON_NOW, visible.filter { epg.now(it) != null }.take(40))
