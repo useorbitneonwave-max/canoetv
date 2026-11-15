@@ -365,7 +365,14 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost
         moviesTop = MoviesAdapter(this)
         movieChannelsAdapter = HomeAdapter(this)
         tmdbRows = TmdbRowsAdapter(this)
-        moviesList.layoutManager = LinearLayoutManager(this)
+        // The row you're on always sits at the top of the list, so moving left/right never makes the screen jump
+        moviesList.layoutManager = object : LinearLayoutManager(this) {
+            override fun requestChildRectangleOnScreen(parent: RecyclerView, child: View, rect: android.graphics.Rect,
+                                                       immediate: Boolean, focusedChildVisible: Boolean): Boolean {
+                if (child.top != parent.paddingTop) scrollToPositionWithOffset(getPosition(child), 0)
+                return true
+            }
+        }
         moviesList.adapter = androidx.recyclerview.widget.ConcatAdapter(moviesTop, tmdbRows, movieChannelsAdapter, moviesAdapter)
         moviesList.itemAnimator = null
 
@@ -651,10 +658,56 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost
         if (!store.englishOnly) p else p.copy(movies = p.movies.filter { it.lang.isEmpty() || it.lang == "en" })
 
     /** Netflix style: the row you're on moves up so its name sits just under the big panel. */
-    override fun tmdbRowFocused(row: View) {
-        if (row.parent !== moviesList) return
-        val dy = row.top - moviesList.paddingTop
-        if (dy != 0) moviesList.smoothScrollBy(0, dy)
+    override fun tmdbRowFocused(row: View) {}
+
+    /**
+     * Up/Down on the Movies screen: go to the row above or below (the next row may not be on screen yet,
+     * which used to send the highlight to the side menu). Keeps roughly the same position across.
+     */
+    private fun moviesRowMove(dir: Int): Boolean {
+        val f = currentFocus ?: return false
+        var row: View = f
+        while (row.parent !== moviesList) row = (row.parent as? View) ?: return false
+        val pos = moviesList.getChildAdapterPosition(row)
+        if (pos == RecyclerView.NO_POSITION) return false
+        var idx = 0
+        val inner = row.findViewById<RecyclerView>(R.id.rowList)
+        if (inner != null) {
+            var c: View = f
+            while (c.parent !== inner) c = (c.parent as? View) ?: break
+            if (c.parent === inner) {
+                // Which column on screen you're in, so the highlight goes straight down
+                val first = (inner.layoutManager as? LinearLayoutManager)?.findFirstVisibleItemPosition() ?: 0
+                idx = (inner.getChildAdapterPosition(c) - first).coerceAtLeast(0)
+            }
+        }
+        focusMoviesRow(pos + dir, dir, idx, 0)
+        return true
+    }
+
+    private fun focusMoviesRow(target: Int, dir: Int, idx: Int, tries: Int) {
+        val total = moviesList.adapter?.itemCount ?: 0
+        if (target !in 0 until total || tries > 6) return
+        (moviesList.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(target, 0)
+        moviesList.post {
+            val vh = moviesList.findViewHolderForAdapterPosition(target)
+            val inner = vh?.itemView?.findViewById<RecyclerView>(R.id.rowList)
+            when {
+                inner != null && inner.visibility == View.VISIBLE && (inner.adapter?.itemCount ?: 0) > 0 -> {
+                    val ilm = inner.layoutManager as LinearLayoutManager
+                    val i = (ilm.findFirstVisibleItemPosition().coerceAtLeast(0) + idx).coerceAtMost((inner.adapter?.itemCount ?: 1) - 1)
+                    val shown = ilm.findViewByPosition(i)
+                    if (shown != null) shown.requestFocus()
+                    else {
+                        ilm.scrollToPositionWithOffset(i, 0)
+                        inner.post { (ilm.findViewByPosition(i) ?: inner.getChildAt(0))?.requestFocus() }
+                    }
+                }
+                vh != null && vh.itemView.isFocusable -> vh.itemView.requestFocus()
+                vh != null && vh.itemView.findFocus() == null && vh.itemView.requestFocus() -> Unit
+                else -> focusMoviesRow(target + dir, dir, idx, tries + 1) // a heading: skip it
+            }
+        }
     }
 
     private fun renderTmdb() {
@@ -3046,6 +3099,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost
                 code == KeyEvent.KEYCODE_CHANNEL_DOWN && section == Section.LIVE -> { step(1); return true }
                 code == KeyEvent.KEYCODE_LAST_CHANNEL -> { lastChannel(); return true }
                 code == KeyEvent.KEYCODE_MENU -> { showMenu(); return true }
+                section == Section.MOVIES && (code == KeyEvent.KEYCODE_DPAD_DOWN || code == KeyEvent.KEYCODE_DPAD_UP) &&
+                    moviesRowMove(if (code == KeyEvent.KEYCODE_DPAD_DOWN) 1 else -1) -> return true
                 !typing && code in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> {
                     typeDigit(code - KeyEvent.KEYCODE_0); return true
                 }
