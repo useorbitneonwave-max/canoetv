@@ -15,14 +15,20 @@ data class TMovie(
     val poster: String?,   // path like "/abc.jpg"
     val backdrop: String?,
     val genreIds: List<Int>,
+    val lang: String = "",        // original language, like "en"
+    val votes: Int = 0,
+    val released: String = "",    // yyyy-mm-dd
 ) {
+    /** Not out yet, or too few votes for the score to mean much. */
+    val ratingReliable: Boolean get() =
+        votes >= 25 && (released.isEmpty() || released <= java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date()))
     val posterUrl: String? get() = poster?.let { Tmdb.IMG + "w342" + it }
     val backdropUrl: String? get() = backdrop?.let { Tmdb.IMG + "w1280" + it }
-    val ratingText: String get() = if (rating > 0) String.format(java.util.Locale.US, "%.1f", rating) else ""
+    val ratingText: String get() = if (rating > 0 && ratingReliable) String.format(java.util.Locale.US, "%.1f", rating) else ""
 
     fun toJson(): JSONObject = JSONObject().put("id", id).put("title", title).put("year", year).put("rating", rating)
         .put("overview", overview).put("poster", poster ?: "").put("backdrop", backdrop ?: "")
-        .put("genres", JSONArray(genreIds))
+        .put("genres", JSONArray(genreIds)).put("original_language", lang).put("vote_count", votes).put("released", released)
 
     companion object {
         fun fromJson(o: JSONObject): TMovie {
@@ -42,6 +48,9 @@ data class TMovie(
                 o.optString("poster_path", o.optString("poster")).takeIf { it.isNotEmpty() && it != "null" },
                 o.optString("backdrop_path", o.optString("backdrop")).takeIf { it.isNotEmpty() && it != "null" },
                 ids,
+                o.optString("original_language"),
+                o.optInt("vote_count"),
+                o.optString("release_date", o.optString("released")).takeIf { it.length >= 4 && it != "null" } ?: "",
             )
         }
     }
@@ -107,6 +116,9 @@ object Tmdb {
     )
 
     fun genres(m: TMovie) = m.genreIds.mapNotNull { genreNames[it] }.joinToString(", ")
+
+    /** Asks TMDB for English-language films only (for the lists that can filter). */
+    fun english(path: String) = if (path.startsWith("/discover/")) "$path&with_original_language=en" else path
 
     fun url(path: String, key: String, page: Int = 1): String {
         val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())

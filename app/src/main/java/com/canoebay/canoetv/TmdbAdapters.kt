@@ -15,6 +15,8 @@ interface TmdbHost {
     fun tmdbFocused(m: TMovie)
     fun tmdbSeeAll(row: TRow)
     fun tmdbIsFree(m: TMovie): Boolean
+    /** A poster in this row got focus: scroll so the row's name stays in view. */
+    fun tmdbRowFocused(row: View) {}
 }
 
 /** A row of TMDB posters. [row] is null for rows that aren't a TMDB list (My List, search results). */
@@ -52,7 +54,9 @@ class TmdbRowsAdapter(private val host: TmdbHost) : RecyclerView.Adapter<TmdbRow
     override fun onBindViewHolder(h: VH, position: Int) {
         val item = items[position]
         h.title.text = if (item.total > 0) "${item.title}   ·   ${item.total} movies" else item.title
-        (h.list.adapter as TmdbPosterAdapter).submit(item.movies, item.row)
+        val pa = h.list.adapter as TmdbPosterAdapter
+        pa.submit(item.movies, item.row)
+        pa.onFocus = { host.tmdbRowFocused(h.itemView) }
     }
 }
 
@@ -62,6 +66,7 @@ class TmdbPosterAdapter(private val host: TmdbHost, private val fixedWidth: Bool
 
     private var items: List<TMovie> = emptyList()
     private var row: TRow? = null
+    var onFocus: (() -> Unit)? = null
 
     fun submit(list: List<TMovie>, row: TRow?) {
         items = list
@@ -114,7 +119,7 @@ class TmdbPosterAdapter(private val host: TmdbHost, private val fixedWidth: Bool
             h.free.visibility = View.GONE
             h.title.text = r.title
             h.itemView.setOnClickListener { host.tmdbSeeAll(r) }
-            h.itemView.setOnFocusChangeListener { v, has -> zoom(v, has) }
+            h.itemView.setOnFocusChangeListener { v, has -> zoom(v, has); if (has) onFocus?.invoke() }
             return
         }
         val m = items[position]
@@ -130,7 +135,7 @@ class TmdbPosterAdapter(private val host: TmdbHost, private val fixedWidth: Bool
         h.itemView.setOnFocusChangeListener { v, has ->
             zoom(v, has)
             h.title.isSelected = has
-            if (has) host.tmdbFocused(m)
+            if (has) { host.tmdbFocused(m); onFocus?.invoke() }
         }
     }
 

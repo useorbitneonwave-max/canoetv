@@ -628,7 +628,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost
         for (row in Tmdb.rows) {
             moviePool.execute {
                 try {
-                    val page = Tmdb.parseList(Tmdb.cached(cacheDir, Tmdb.url(row.path, key), 6 * 3600_000L) { download(it) })
+                    val page = englishFilter(Tmdb.parseList(Tmdb.cached(cacheDir, Tmdb.url(tmdbPath(row), key), 6 * 3600_000L) { download(it) }))
                     if (row.free) page.movies.forEach { tmdbFree.add(it.id) }
                     tmdbLists[row.title] = page
                 } catch (e: Exception) {
@@ -642,6 +642,19 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost
                 runOnUiThread { if (section == Section.MOVIES) renderMovies() }
             }
         }
+    }
+
+    private fun tmdbPath(row: TRow) = if (store.englishOnly) Tmdb.english(row.path) else row.path
+
+    /** Follows the "English channels only" setting: only English-language films. */
+    private fun englishFilter(p: Tmdb.Page): Tmdb.Page =
+        if (!store.englishOnly) p else p.copy(movies = p.movies.filter { it.lang.isEmpty() || it.lang == "en" })
+
+    /** Netflix style: the row you're on moves up so its name sits just under the big panel. */
+    override fun tmdbRowFocused(row: View) {
+        if (row.parent !== moviesList) return
+        val dy = row.top - moviesList.paddingTop
+        if (dy != 0) moviesList.smoothScrollBy(0, dy)
     }
 
     private fun renderTmdb() {
@@ -703,7 +716,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost
         v.findViewById<ImageView>(R.id.dBackdrop).load(m.backdropUrl)
         v.findViewById<ImageView>(R.id.dPoster).load(m.posterUrl) { crossfade(true) }
         v.findViewById<TextView>(R.id.dTitle).text = if (m.year.isNotEmpty()) "${m.title} (${m.year})" else m.title
-        v.findViewById<android.widget.RatingBar>(R.id.dStars).rating = (m.rating / 2).toFloat()
+        v.findViewById<android.widget.RatingBar>(R.id.dStars).apply { rating = (m.rating / 2).toFloat(); visibility = if (m.ratingReliable) View.VISIBLE else View.INVISIBLE }
         v.findViewById<TextView>(R.id.dOverview).text = m.overview
         val play = v.findViewById<TextView>(R.id.dPlay)
         val trailer = v.findViewById<TextView>(R.id.dTrailer)
@@ -843,7 +856,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost
             loading = true
             val next = page + 1
             moviePool.execute {
-                val p = try { Tmdb.parseList(Tmdb.cached(cacheDir, Tmdb.url(row.path, key, next), 6 * 3600_000L) { download(it) }) }
+                val p = try { englishFilter(Tmdb.parseList(Tmdb.cached(cacheDir, Tmdb.url(tmdbPath(row), key, next), 6 * 3600_000L) { download(it) })) }
                 catch (e: Exception) { null }
                 runOnUiThread {
                     loading = false
@@ -1523,6 +1536,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost
             store.englishOnly = it
             loadedSourceId?.let { id -> loadedSourceId = null; current = null; setupSources(id) }
             loadMovieChannels(force = true)
+            tmdbLists.clear(); tmdbLoadedKey = ""; loadTmdb(force = true)
         }
         row("Add your own playlist", "An M3U link from a provider you subscribe to") { showAddDialog() }
         row("Remove one of your playlists", "${store.customSources().size} added") { showRemoveDialog() }
