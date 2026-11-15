@@ -22,6 +22,7 @@ This information never leaves your device unless you choose to save a backup fil
 - **Channel lists:** Free-TV (GitHub), plus any optional lists you switch on (iptv-org) or add yourself.
 - **TV guide files:** epgshare01.online and any guide links named in your playlists.
 - **Movies:** the Internet Archive (archive.org), for the public-domain film catalogue, posters and the films you play.
+- **Movie channels:** the Pluto TV, Samsung TV Plus, Plex and Tubi channel lists and guides, to show 24/7 movie channels.
 - **Streams:** when you play a channel, the video comes directly from that channel's own server.
 - **App updates:** GitHub, to check for and download new versions of CanoeTV.
 

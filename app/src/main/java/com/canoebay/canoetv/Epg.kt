@@ -71,12 +71,14 @@ class Epg(private val dir: File) {
      * Loads each guide URL (cached on disk for 12h), keeping only channels in [wanted].
      * [fetch] downloads a URL into a file. [onUpdate] runs (on a background thread) after each file.
      */
-    fun load(urls: List<String>, wanted: Set<String>, wantedNames: Set<String>, fetch: (String, File) -> Unit, onUpdate: () -> Unit) {
+    fun load(urls: List<String>, wanted: Set<String>, wantedNames: Set<String>, fetch: (String, File) -> Unit,
+             tag: String = "", onUpdate: () -> Unit) {
         val now = System.currentTimeMillis()
         for (u in urls.distinct()) {
-            val last = attempted[u]
+            // [tag] lets a second set of channels (like the movie channels) read the same guide file
+            val last = attempted[tag + u]
             if (last != null && now - last < 6 * 3600_000L) continue
-            attempted[u] = now
+            attempted[tag + u] = now
             pool.execute {
                 try {
                     val f = File(dir, "guide_" + Integer.toHexString(u.hashCode()) + ".xml")

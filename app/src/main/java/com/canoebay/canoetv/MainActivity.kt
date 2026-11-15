@@ -205,8 +205,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                     surfVisible() -> hideSurf()
                     fullscreen -> {
                         setFullscreen(false)
-                        // Came from the guide: go back to it
-                        if (returnToGuide) { returnToGuide = false; showSection(Section.GUIDE) }
+                        // Came from the guide or Movies: go back there
+                        returnTo?.let { returnTo = null; showSection(it) }
                     }
                     else -> showSection(Section.HOME)
                 }
@@ -274,7 +274,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                     "that broadcasters make publicly available, and playlists you add yourself.\n\n" +
                     "Channel lists\n• Free-TV (github.com/Free-TV/IPTV) — built in\n" +
                     "• iptv-org (github.com/iptv-org/iptv) — built in\n\n" +
-                    "Movies\n• Public-domain films from the Internet Archive (archive.org)\n\n" +
+                    "Movies\n• 24/7 movie channels from Pluto TV, Samsung TV Plus, Plex and Tubi\n" +
+                    "• Free movie apps open in their own app\n• Public-domain films from the Internet Archive (archive.org)\n\n" +
                     "TV guide data\n• epgshare01.online, and guide links named by your playlists\n\n" +
                     "Made with\n• AndroidX Media3 (Apache 2.0)\n• Coil (Apache 2.0)\n\n" +
                     "If you own a channel and want it removed, please contact the list it comes from.\n\n" +
@@ -359,8 +360,10 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
         moviesList = findViewById(R.id.moviesList)
         moviesAdapter = MoviesAdapter(this)
+        moviesTop = MoviesAdapter(this)
+        movieChannelsAdapter = HomeAdapter(this)
         moviesList.layoutManager = LinearLayoutManager(this)
-        moviesList.adapter = moviesAdapter
+        moviesList.adapter = androidx.recyclerview.widget.ConcatAdapter(moviesTop, movieChannelsAdapter, moviesAdapter)
         moviesList.itemAnimator = null
 
         homeAdapter = HomeAdapter(this)
@@ -536,7 +539,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                 "Free live TV from around the world, a TV guide, and free classic movies.\n\n" +
                     "• Home — what you watched last, your favourites and what's on now\n" +
                     "• Live TV — every channel, with a list on the side\n" +
-                    "• Movies — free public-domain films\n" +
+                    "• Movies — free 24/7 movie channels, free movie apps and classic films\n" +
                     "• TV Guide — what's on now and next\n\n" +
                     "Tip: long-press a channel (or hold OK on the remote) to add it to your favourites."
             )
@@ -597,7 +600,87 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private var moviesRequested = false
     private val moviesFailed = AtomicInteger()
 
+    // Movie channels: 24/7 movie channels from Pluto TV, Samsung TV Plus, Plex and Tubi, playing inside CanoeTV
+    private lateinit var moviesTop: MoviesAdapter
+    private lateinit var movieChannelsAdapter: HomeAdapter
+    @Volatile private var movieChannels: List<Channel> = emptyList()
+    private var movieChannelsLoadedAt = 0L
+    private var movieChannelsLoading = false
+    private var movieChannelsFailed = false
+    private var lastMoviesTop: List<MovieItem> = emptyList()
+    private var lastMovieChannelItems: List<HomeItem> = emptyList()
+    private var movieByUrl: Map<String, Channel> = emptyMap()
+
+    /** A channel from the loaded list, or one of the movie channels. */
+    private fun anyChannel(url: String): Channel? = byUrl[url] ?: movieByUrl[url]
+
+    private fun loadMovieChannels(force: Boolean = false) {
+        if (movieChannelsLoading) return
+        if (!force && movieChannels.isNotEmpty() && System.currentTimeMillis() - movieChannelsLoadedAt < 6 * 3600_000L) return
+        movieChannelsLoading = true
+        movieChannelsFailed = false
+        val englishOnly = store.englishOnly
+        io.execute {
+            val all = ArrayList<Channel>()
+            val guides = ArrayList<String>()
+            for (u in MovieChannels.lists) {
+                val cached = cacheFile(u)
+                val fresh = !force && cached.exists() && System.currentTimeMillis() - cached.lastModified() < 3 * 3600_000L
+                val text = if (fresh) cached.readText() else try {
+                    download(u).also { cached.writeText(it) }
+                } catch (e: Exception) {
+                    cached.takeIf { it.exists() }?.readText()
+                }
+                if (text != null) {
+                    guides.addAll(M3u.guideUrls(text))
+                    all.addAll(M3u.parse(text))
+                }
+            }
+            val picked = MovieChannels.pick(all, englishOnly)
+            picked.forEach { c -> store.renamed(c.url)?.let { c.name = it } }
+            runOnUiThread {
+                movieChannelsLoading = false
+                movieChannels = picked
+                movieByUrl = picked.associateBy { it.url }
+                movieChannelsFailed = picked.isEmpty()
+                if (picked.isNotEmpty()) movieChannelsLoadedAt = System.currentTimeMillis()
+                renderMovies()
+                homeDirty = true
+                if (section == Section.HOME) refreshHome()
+                // Which movie is on now, from each service's own guide
+                val ids = picked.mapNotNull { c -> Epg.norm(c.tvgId).takeIf { it.isNotEmpty() } }.toHashSet()
+                val names = picked.mapNotNull { c -> Epg.nameKey(c.name).takeIf { it.isNotEmpty() } }.toHashSet()
+                val urls = guides.filter { !it.contains("epgshare01") }.distinct()
+                if (urls.isNotEmpty()) epg.load(urls, ids, names, ::downloadToFile, tag = "movies:") {
+                    runOnUiThread {
+                        when (section) {
+                            Section.MOVIES -> movieChannelsAdapter.refreshInPlace(moviesList)
+                            Section.HOME -> homeAdapter.refreshInPlace(homeList)
+                            else -> Unit
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun movieChannelItems(): List<HomeItem> {
+        val items = ArrayList<HomeItem>()
+        val list = movieChannels.filter { store.health(it.url) != false }
+        if (list.isNotEmpty()) {
+            // Channels with a movie on right now come first
+            items.add(HomeItem.Row("🎬 Movie channels — playing now", list.sortedByDescending { epg.now(it) != null }))
+            for (g in MovieChannels.genres.map { it.first } + MovieChannels.OTHER) {
+                val inGenre = list.filter { it.group == g }
+                if (inGenre.size >= 2) items.add(HomeItem.Row(g, inGenre))
+            }
+        }
+        items.add(HomeItem.Apps("Free movies on demand — free with ads, opens the app", MyApps.freeMovieApps))
+        return items
+    }
+
     private fun loadMovies(force: Boolean = false) {
+        loadMovieChannels(force)
         renderMovies()
         if (moviesRequested && !force) return
         moviesRequested = true
@@ -617,8 +700,20 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     private fun renderMovies() {
         if (!::moviesAdapter.isInitialized) return
+        val top = ArrayList<MovieItem>()
+        top.add(MovieItem.Header("🎬  Movies", when {
+            movieChannels.isNotEmpty() -> "Free 24/7 movie channels that play right here, free movie apps, and free classics"
+            movieChannelsLoading -> "Loading movie channels…"
+            movieChannelsFailed -> "Couldn't load movie channels right now. Check your internet connection, then open Movies again."
+            else -> "Free 24/7 movie channels, free movie apps, and free classics"
+        }))
+        // Only rebuild rows that changed, so TV focus stays put while the classics load
+        if (top != lastMoviesTop) { lastMoviesTop = top; moviesTop.submit(top) }
+        val mc = movieChannelItems()
+        if (mc != lastMovieChannelItems) { lastMovieChannelItems = mc; movieChannelsAdapter.submit(mc) }
+
         val items = ArrayList<MovieItem>()
-        items.add(MovieItem.Header("🎬  Movies", "Free classic films in the public domain, from the Internet Archive"))
+        items.add(MovieItem.Header("Free classics — play right here", "Classic films in the public domain, from the Internet Archive"))
         store.continueMovies().takeIf { it.isNotEmpty() }?.let { items.add(MovieItem.Row("Continue watching", it)) }
         store.myMovieList().takeIf { it.isNotEmpty() }?.let { items.add(MovieItem.Row("My List", it)) }
         var rowsShown = 0
@@ -739,7 +834,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             return
         }
         val alreadyPlaying = ch.url == current?.url && player.playbackState != Player.STATE_IDLE
-        returnToGuide = section == Section.GUIDE
+        returnTo = if (section == Section.GUIDE || section == Section.MOVIES) section else null
         if (section != Section.LIVE) showSection(Section.LIVE, resume = false)
         if (alreadyPlaying) {
             store.lastUrl = ch.url
@@ -796,8 +891,8 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         val items = ArrayList<HomeItem>()
 
         val heroCh = current
-            ?: store.lastUrl?.let { byUrl[it] }
-            ?: store.favOrder.firstNotNullOfOrNull { byUrl[it] }
+            ?: store.lastUrl?.let { anyChannel(it) }
+            ?: store.favOrder.firstNotNullOfOrNull { anyChannel(it) }
             ?: visible.firstOrNull { epg.now(it) != null }
             ?: visible.firstOrNull()
         if (heroCh != null) {
@@ -807,8 +902,10 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
         fun row(title: String, list: List<Channel>) { if (list.isNotEmpty()) items.add(HomeItem.Row(title, list)) }
         items.add(HomeItem.Apps("My apps", myAppsInOrder()))
-        row("Continue watching", store.recents.mapNotNull { byUrl[it] }.filter { it.url != heroCh?.url }.take(15))
-        row("My List", store.favOrder.mapNotNull { byUrl[it] })
+        row("Continue watching", store.recents.mapNotNull { anyChannel(it) }.filter { it.url != heroCh?.url }.take(15))
+        row("My List", store.favOrder.mapNotNull { anyChannel(it) })
+        row("🎬 Movie channels", movieChannels.filter { store.health(it.url) != false }
+            .sortedByDescending { epg.now(it) != null }.take(30))
         row(ROW_ON_NOW, visible.filter { epg.now(it) != null }.take(40))
         visible.groupBy { it.group }.entries
             .sortedByDescending { it.value.size }
@@ -1099,6 +1196,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         toggle("English channels only", "hides Bollywood, European and other foreign-language channels", { store.englishOnly }) {
             store.englishOnly = it
             loadedSourceId?.let { id -> loadedSourceId = null; current = null; setupSources(id) }
+            loadMovieChannels(force = true)
         }
         row("Add your own playlist", "An M3U link from a provider you subscribe to") { showAddDialog() }
         row("Remove one of your playlists", "${store.customSources().size} added") { showRemoveDialog() }
@@ -1628,6 +1726,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                 refreshSections()
                 playPending()
                 if (!tvRowPublished && result.isNotEmpty()) { tvRowPublished = true; publishTvRow() }
+                loadMovieChannels()
             }
         }
     }
@@ -2160,7 +2259,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private val maxReconnects = 6
     private var reconnectPending = false
     private var soundOffFor: String? = null
-    private var returnToGuide = false
+    private var returnTo: Section? = null
 
     // ---- connection info box
     private var statDropped = 0

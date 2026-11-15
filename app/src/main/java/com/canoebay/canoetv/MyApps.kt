@@ -33,6 +33,9 @@ object MyApps {
         AppEntry("CBC Gem", 0xFF5A1A1A.toInt(), "ca.cbc.android.cbctv", "ca.cbc.android.cbctv"),
     )
 
+    /** Free services with movies on demand (free with ads, just a free account at most). */
+    val freeMovieApps: List<AppEntry> get() = listOf("Tubi", "Pluto TV", "Plex", "CBC Gem").mapNotNull { n -> all.firstOrNull { it.name == n } }
+
     fun installed(context: Context, app: AppEntry): String? {
         val pm = context.packageManager
         return app.packages.firstOrNull { pkg ->

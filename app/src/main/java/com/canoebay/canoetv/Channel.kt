@@ -27,8 +27,8 @@ data class Source(
 object Sources {
     const val FREE_TV = "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8"
     private const val IPTV_ORG = "https://iptv-org.github.io/iptv"
-    private const val PLUTO = "https://raw.githubusercontent.com/BuddyChewChew/pluto/main"
-    private const val FAST = "https://raw.githubusercontent.com/BuddyChewChew/app-m3u-generator/main/playlists"
+    const val PLUTO = "https://raw.githubusercontent.com/BuddyChewChew/pluto/main"
+    const val FAST = "https://raw.githubusercontent.com/BuddyChewChew/app-m3u-generator/main/playlists"
     private const val XUMO = "https://raw.githubusercontent.com/BuddyChewChew/xumo-playlist-generator/main/playlists/xumo_playlist.m3u"
 
     const val START = "Start here"
