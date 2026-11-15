@@ -62,7 +62,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(UnstableApi::class)
-class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
+class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost, TmdbHost {
 
     companion object {
         private const val KEY_ALL = "\u0000all"
@@ -275,7 +275,9 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
                     "Channel lists\n• Free-TV (github.com/Free-TV/IPTV) — built in\n" +
                     "• iptv-org (github.com/iptv-org/iptv) — built in\n\n" +
                     "Movies\n• 24/7 movie channels from Pluto TV, Samsung TV Plus, Plex and Tubi\n" +
-                    "• Free movie apps open in their own app\n• Public-domain films from the Internet Archive (archive.org)\n\n" +
+                    "• Free movie apps open in their own app\n• Public-domain films from the Internet Archive (archive.org)\n" +
+                    "• Movie info, posters and where-to-watch data from TMDB (themoviedb.org), with streaming data from JustWatch. " +
+                    "This product uses the TMDB API but is not endorsed or certified by TMDB.\n\n" +
                     "TV guide data\n• epgshare01.online, and guide links named by your playlists\n\n" +
                     "Made with\n• AndroidX Media3 (Apache 2.0)\n• Coil (Apache 2.0)\n\n" +
                     "If you own a channel and want it removed, please contact the list it comes from.\n\n" +
@@ -362,8 +364,9 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         moviesAdapter = MoviesAdapter(this)
         moviesTop = MoviesAdapter(this)
         movieChannelsAdapter = HomeAdapter(this)
+        tmdbRows = TmdbRowsAdapter(this)
         moviesList.layoutManager = LinearLayoutManager(this)
-        moviesList.adapter = androidx.recyclerview.widget.ConcatAdapter(moviesTop, movieChannelsAdapter, moviesAdapter)
+        moviesList.adapter = androidx.recyclerview.widget.ConcatAdapter(moviesTop, tmdbRows, movieChannelsAdapter, moviesAdapter)
         moviesList.itemAnimator = null
 
         homeAdapter = HomeAdapter(this)
@@ -448,6 +451,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
     private lateinit var searchList: RecyclerView
     private lateinit var searchChannels: HomeAdapter
     private lateinit var searchMovies: MoviesAdapter
+    private lateinit var searchTmdb: TmdbRowsAdapter
     private var searchToken = 0
     private val searchRunnable = Runnable { runSearch(searchBox.text.toString().trim()) }
 
@@ -457,8 +461,9 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         searchList = findViewById(R.id.searchList)
         searchChannels = HomeAdapter(this)
         searchMovies = MoviesAdapter(this)
+        searchTmdb = TmdbRowsAdapter(this)
         searchList.layoutManager = LinearLayoutManager(this)
-        searchList.adapter = androidx.recyclerview.widget.ConcatAdapter(searchChannels, searchMovies)
+        searchList.adapter = androidx.recyclerview.widget.ConcatAdapter(searchChannels, searchTmdb, searchMovies)
         searchList.itemAnimator = null
         searchBox.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -481,6 +486,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         if (q.length < 2) {
             searchChannels.submit(emptyList())
             searchMovies.submit(emptyList())
+            searchTmdb.submit(emptyList())
             searchHint.text = "Type at least 2 letters. Search looks through channel names, categories, what's on in the TV guide, and free movies."
             return
         }
@@ -508,6 +514,15 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
         searchChannels.submit(rows)
         searchMovies.submit(emptyList())
+        searchTmdb.submit(emptyList())
+        store.tmdbKey.takeIf { it.isNotEmpty() }?.let { key ->
+            moviePool.execute {
+                val found = try { Tmdb.parseList(download(Tmdb.searchUrl(q, key))).movies } catch (e: Exception) { emptyList() }
+                runOnUiThread {
+                    if (token == searchToken && found.isNotEmpty()) searchTmdb.submit(listOf(TmdbItem("Movies", found, null)))
+                }
+            }
+        }
         val chCount = byName.size
         val showCount = airingNow.size + later.size
         searchHint.text = if (rows.isEmpty()) "No channels or shows match “$q”. Looking for movies…"
@@ -520,7 +535,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             } catch (e: Exception) { null }
             runOnUiThread {
                 if (token != searchToken) return@runOnUiThread
-                if (!found.isNullOrEmpty()) searchMovies.submit(listOf(MovieItem.Row("Free movies", found)))
+                if (!found.isNullOrEmpty()) searchMovies.submit(listOf(MovieItem.Row("Free classics", found)))
                 searchHint.text = when {
                     rows.isEmpty() && found.isNullOrEmpty() -> "Nothing matches “$q”. Try a shorter word."
                     found == null -> "$chCount channels · $showCount with matching shows · movies couldn't be searched right now"
@@ -589,6 +604,302 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         )
         pendingPlay = null
         watch(ch)
+    }
+
+
+    // ---- Movies 2.0: the latest movies from TMDB, with where to watch them in Canada
+
+    private lateinit var tmdbRows: TmdbRowsAdapter
+    private val tmdbLists = ConcurrentHashMap<String, Tmdb.Page>()
+    private val tmdbFree = java.util.Collections.newSetFromMap(ConcurrentHashMap<Int, Boolean>())
+    private val tmdbDetails = ConcurrentHashMap<Int, TDetails>()
+    private var tmdbLoadedKey = ""
+    @Volatile private var tmdbFailed: String? = null
+    private var heroMovie: TMovie? = null
+    private val heroRunnable = Runnable { heroMovie?.let { loadHeroDetails(it) } }
+
+    private fun loadTmdb(force: Boolean = false) {
+        val key = store.tmdbKey
+        if (key.isEmpty()) { tmdbLists.clear(); renderTmdb(); return }
+        if (!force && key == tmdbLoadedKey && tmdbLists.isNotEmpty()) return
+        tmdbLoadedKey = key
+        tmdbFailed = null
+        val failures = AtomicInteger()
+        for (row in Tmdb.rows) {
+            moviePool.execute {
+                try {
+                    val page = Tmdb.parseList(Tmdb.cached(cacheDir, Tmdb.url(row.path, key), 6 * 3600_000L) { download(it) })
+                    if (row.free) page.movies.forEach { tmdbFree.add(it.id) }
+                    tmdbLists[row.title] = page
+                } catch (e: Exception) {
+                    if (failures.incrementAndGet() >= Tmdb.rows.size) {
+                        tmdbFailed = if (e.message?.contains("401") == true)
+                            "Your TMDB key wasn't accepted. Check it in Settings → Movies."
+                        else "Couldn't load the latest movies right now. Check your internet connection, then open Movies again."
+                        tmdbLoadedKey = ""
+                    }
+                }
+                runOnUiThread { if (section == Section.MOVIES) renderMovies() }
+            }
+        }
+    }
+
+    private fun renderTmdb() {
+        if (!::tmdbRows.isInitialized) return
+        val items = ArrayList<TmdbItem>()
+        if (store.tmdbKey.isNotEmpty()) {
+            store.tmdbMyList().takeIf { it.isNotEmpty() }?.let { items.add(TmdbItem("♥ My List", it, null)) }
+            for (row in Tmdb.rows) {
+                val page = tmdbLists[row.title] ?: continue
+                if (page.movies.size >= 4) items.add(TmdbItem(row.title, page.movies, row))
+            }
+        }
+        tmdbRows.submit(items)
+        val showHero = items.isNotEmpty() && (isTv() || resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+        val hero = findViewById<View>(R.id.mHero)
+        hero.visibility = if (showHero) View.VISIBLE else View.GONE
+        if (showHero && heroMovie == null) items.firstOrNull { it.row != null }?.movies?.firstOrNull()?.let { tmdbFocused(it) }
+    }
+
+    override fun tmdbIsFree(m: TMovie) = m.id in tmdbFree
+
+    override fun tmdbFocused(m: TMovie) {
+        heroMovie = m
+        findViewById<ImageView>(R.id.mHeroImage).load(m.backdropUrl ?: m.posterUrl) { crossfade(250) }
+        findViewById<TextView>(R.id.mHeroTitle).text = if (m.year.isNotEmpty()) "${m.title} (${m.year})" else m.title
+        findViewById<TextView>(R.id.mHeroOverview).text = m.overview
+        showHeroFacts(m, tmdbDetails[m.id])
+        handler.removeCallbacks(heroRunnable)
+        if (tmdbDetails[m.id] == null) handler.postDelayed(heroRunnable, 450)
+    }
+
+    private fun showHeroFacts(m: TMovie, d: TDetails?) {
+        val parts = listOf(m.year, d?.runtimeText ?: "", if (m.ratingText.isNotEmpty()) "★ ${m.ratingText}" else "",
+            d?.genres?.joinToString(", ") ?: Tmdb.genres(m)).filter { it.isNotEmpty() }
+        findViewById<TextView>(R.id.mHeroMeta).text = parts.joinToString("   •   ") +
+            if (tmdbIsFree(m)) "   •   FREE" else ""
+        findViewById<TextView>(R.id.mHeroPeople).text = if (d == null) "" else listOfNotNull(
+            d.cast.take(4).joinToString(", ") { it.name }.takeIf { it.isNotEmpty() }?.let { "Cast:  $it" },
+            d.director.takeIf { it.isNotEmpty() }?.let { "Director:  $it" },
+        ).joinToString("\n")
+    }
+
+    private fun loadHeroDetails(m: TMovie) {
+        val key = store.tmdbKey.ifEmpty { return }
+        moviePool.execute {
+            val d = try {
+                Tmdb.parseDetails(Tmdb.cached(cacheDir, Tmdb.detailsUrl(m.id, key), 24 * 3600_000L) { download(it) })
+            } catch (e: Exception) { null } ?: return@execute
+            tmdbDetails[m.id] = d
+            runOnUiThread { if (heroMovie?.id == m.id) showHeroFacts(m, d) }
+        }
+    }
+
+    /** The movie page: poster, facts, cast photos, trailer, and where to watch it. */
+    override fun tmdbOpen(m: TMovie) {
+        val dlg = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        dlg.setContentView(R.layout.dialog_tmdb_detail)
+        val v = dlg.window!!.decorView
+        v.findViewById<ImageView>(R.id.dBackdrop).load(m.backdropUrl)
+        v.findViewById<ImageView>(R.id.dPoster).load(m.posterUrl) { crossfade(true) }
+        v.findViewById<TextView>(R.id.dTitle).text = if (m.year.isNotEmpty()) "${m.title} (${m.year})" else m.title
+        v.findViewById<android.widget.RatingBar>(R.id.dStars).rating = (m.rating / 2).toFloat()
+        v.findViewById<TextView>(R.id.dOverview).text = m.overview
+        val play = v.findViewById<TextView>(R.id.dPlay)
+        val trailer = v.findViewById<TextView>(R.id.dTrailer)
+        val fav = v.findViewById<TextView>(R.id.dFav)
+        val where = v.findViewById<TextView>(R.id.dWhere)
+        val castList = v.findViewById<RecyclerView>(R.id.dCast)
+        castList.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
+        fun favLabel() = if (store.isTmdbMine(m.id)) "♥  My List" else "♡  My List"
+        fav.text = favLabel()
+        fav.setOnClickListener {
+            val added = store.toggleTmdbMine(m)
+            fav.text = favLabel()
+            toast(if (added) "Added to My List" else "Removed from My List")
+            renderTmdb()
+        }
+        trailer.visibility = View.GONE
+        fillDetailFacts(v, m, null)
+        play.setOnClickListener { toast("Still checking where to watch…") }
+        dlg.show()
+        play.requestFocus()
+
+        val key = store.tmdbKey
+        moviePool.execute {
+            val d = try {
+                tmdbDetails[m.id] ?: Tmdb.parseDetails(Tmdb.cached(cacheDir, Tmdb.detailsUrl(m.id, key), 24 * 3600_000L) { download(it) })
+                    .also { tmdbDetails[m.id] = it }
+            } catch (e: Exception) { null }
+            runOnUiThread {
+                if (!dlg.isShowing) return@runOnUiThread
+                if (d == null) {
+                    play.text = "Couldn't load details"
+                    where.text = "Check your internet connection and try again."
+                    return@runOnUiThread
+                }
+                fillDetailFacts(v, m, d)
+                castList.adapter = CastAdapter(d.cast)
+                v.findViewById<View>(R.id.dCastTitle).visibility = if (d.cast.isEmpty()) View.GONE else View.VISIBLE
+                d.trailerKey?.let { k ->
+                    trailer.visibility = View.VISIBLE
+                    trailer.setOnClickListener { openTrailer(k) }
+                }
+                setupWatchButton(m, d, play, where)
+            }
+        }
+    }
+
+    private fun fillDetailFacts(v: View, m: TMovie, d: TDetails?) {
+        fun line(label: String, value: String) =
+            if (value.isEmpty()) "" else "<b>$label</b>&nbsp;&nbsp;${android.text.TextUtils.htmlEncode(value)}<br>"
+        val html = line("Directed by:", d?.director ?: "") +
+            line("Release date:", d?.releaseDate ?: m.year) +
+            line("Duration:", d?.runtimeText ?: "") +
+            line("Genre:", d?.genres?.joinToString(", ") ?: Tmdb.genres(m)) +
+            line("Rating:", if (m.ratingText.isNotEmpty()) "${m.ratingText} / 10" else "") +
+            line("Cast:", d?.cast?.take(5)?.joinToString(", ") { it.name } ?: "")
+        v.findViewById<TextView>(R.id.dFacts).text =
+            androidx.core.text.HtmlCompat.fromHtml(html.removeSuffix("<br>"), androidx.core.text.HtmlCompat.FROM_HTML_MODE_LEGACY)
+    }
+
+    /** Play opens the movie's free or subscription service; rent and buy are never offered. */
+    private fun setupWatchButton(m: TMovie, d: TDetails, play: TextView, where: TextView) {
+        data class Option(val provider: TProvider, val app: AppEntry)
+        val options = d.providers.mapNotNull { p -> Tmdb.appFor(p.name)?.let { Option(p, it) } }
+            .distinctBy { it.app.name }
+            .sortedWith(compareBy<Option> { if (it.provider.kind == "flatrate") 1 else 0 }
+                .thenBy { if (MyApps.installed(this, it.app) != null) 0 else 1 })
+        fun kindLabel(k: String) = when (k) { "free" -> "free"; "ads" -> "free with ads"; else -> "with your subscription" }
+
+        val free = d.providers.filter { it.kind != "flatrate" }.map { it.name }
+        val subs = d.providers.filter { it.kind == "flatrate" }.map { it.name }
+        where.text = listOfNotNull(
+            free.takeIf { it.isNotEmpty() }?.let { "Free in Canada on: ${it.joinToString(", ")}" },
+            subs.takeIf { it.isNotEmpty() }?.let { "Included with: ${it.joinToString(", ")}" },
+        ).joinToString("\n").ifEmpty {
+            if (tmdbLists[Tmdb.rows[2].title]?.movies?.any { it.id == m.id } == true) "In theatres now — not streaming yet."
+            else "Not streaming free or on a subscription service in Canada right now."
+        }
+
+        if (options.isEmpty()) {
+            play.text = if (d.providers.isEmpty()) "Not streaming in Canada" else "Not on your apps"
+            play.alpha = 0.6f
+            play.setOnClickListener { toast(where.text.toString().lines().first()) }
+            return
+        }
+        val first = options.first()
+        val verb = if (first.provider.kind == "flatrate") "Watch on" else "Free on"
+        play.alpha = 1f
+        play.text = "▶  $verb ${first.app.name}" + if (options.size > 1) "  (+${options.size - 1})" else ""
+        fun go(o: Option) {
+            openApp(o.app)
+            toast("In ${o.app.name}, search for “${m.title}”")
+        }
+        play.setOnClickListener {
+            if (options.size == 1) { go(first); return@setOnClickListener }
+            val labels = options.map { "${it.app.name} — ${kindLabel(it.provider.kind)}" }.toTypedArray()
+            AlertDialog.Builder(this).setTitle("Watch “${m.title}” on…")
+                .setItems(labels) { _, i -> go(options[i]) }
+                .setNegativeButton("Cancel", null).show()
+        }
+    }
+
+    private fun openTrailer(key: String) {
+        val tries = listOf(
+            Intent(Intent.ACTION_VIEW, Uri.parse("vnd.youtube:$key")),
+            Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/watch?v=$key")),
+        )
+        for (i in tries) {
+            try { startActivity(i); return } catch (e: ActivityNotFoundException) { }
+        }
+        toast("Install YouTube to watch trailers")
+    }
+
+    /** "See all": a full poster grid that keeps loading as you scroll. */
+    override fun tmdbSeeAll(row: TRow) {
+        val key = store.tmdbKey.ifEmpty { return }
+        val dlg = android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        dlg.setContentView(R.layout.dialog_tmdb_grid)
+        val v = dlg.window!!.decorView
+        val title = v.findViewById<TextView>(R.id.gTitle)
+        val grid = v.findViewById<RecyclerView>(R.id.gList)
+        val widthDp = resources.displayMetrics.widthPixels / resources.displayMetrics.density
+        val cols = (widthDp / 150).toInt().coerceIn(3, 8)
+        val lm = androidx.recyclerview.widget.GridLayoutManager(this, cols)
+        grid.layoutManager = lm
+        val adapter = TmdbPosterAdapter(this, fixedWidth = false)
+        grid.adapter = adapter
+        grid.itemAnimator = null
+        val first = tmdbLists[row.title]
+        var page = 1
+        var totalPages = first?.totalPages ?: 1
+        var loading = false
+        val total = first?.totalResults ?: 0
+        title.text = if (total > 0) "${row.title}   ·   $total movies" else row.title
+        adapter.submit(first?.movies ?: emptyList(), null)
+        fun loadMore() {
+            if (loading || page >= totalPages || page >= 500) return
+            loading = true
+            val next = page + 1
+            moviePool.execute {
+                val p = try { Tmdb.parseList(Tmdb.cached(cacheDir, Tmdb.url(row.path, key, next), 6 * 3600_000L) { download(it) }) }
+                catch (e: Exception) { null }
+                runOnUiThread {
+                    loading = false
+                    if (p == null || !dlg.isShowing) return@runOnUiThread
+                    page = next
+                    totalPages = p.totalPages
+                    if (row.free) p.movies.forEach { tmdbFree.add(it.id) }
+                    val have = adapter.movies().map { it.id }.toHashSet()
+                    adapter.append(p.movies.filter { it.id !in have })
+                }
+            }
+        }
+        grid.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                if (lm.findLastVisibleItemPosition() >= adapter.itemCount - cols * 2) loadMore()
+            }
+        })
+        if (first == null || first.movies.size < cols * 3) loadMore()
+        dlg.show()
+        grid.post { grid.getChildAt(0)?.requestFocus() }
+    }
+
+    private fun showTmdbKeyDialog(onDone: () -> Unit) {
+        val input = EditText(this).apply {
+            hint = "Paste or type your TMDB API Key"
+            setText(store.tmdbKey)
+            setSingleLine()
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val box = FrameLayout(this).apply { setPadding(pad, pad / 2, pad, 0); addView(input) }
+        AlertDialog.Builder(this)
+            .setTitle("TMDB API key")
+            .setMessage("Get a free key at themoviedb.org → Settings → API (use the short “API Key”). " +
+                "It's saved only on this device.")
+            .setView(box)
+            .setPositiveButton("Save") { _, _ ->
+                val key = input.text.toString().trim()
+                if (key.isEmpty()) { store.tmdbKey = ""; tmdbLists.clear(); onDone(); return@setPositiveButton }
+                toast("Checking your key…")
+                moviePool.execute {
+                    val ok = try { download(Tmdb.checkUrl(key)); true } catch (e: Exception) { e.message?.contains("401") != true }
+                    runOnUiThread {
+                        if (ok) {
+                            store.tmdbKey = key
+                            tmdbLists.clear(); tmdbLoadedKey = ""
+                            toast("Key saved — open Movies to see the latest movies")
+                            loadTmdb(force = true)
+                        } else toast("That key wasn't accepted. Check that you copied the short “API Key”.")
+                        onDone()
+                    }
+                }
+            }
+            .setNeutralButton("Remove") { _, _ -> store.tmdbKey = ""; tmdbLists.clear(); tmdbLoadedKey = ""; renderMovies(); onDone() }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     // ---- Movies (public-domain films from the Internet Archive)
@@ -684,6 +995,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
 
     private fun loadMovies(force: Boolean = false) {
         loadMovieChannels(force)
+        loadTmdb(force)
         renderMovies()
         if (moviesRequested && !force) return
         moviesRequested = true
@@ -705,11 +1017,18 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         if (!::moviesAdapter.isInitialized) return
         val top = ArrayList<MovieItem>()
         top.add(MovieItem.Header("🎬  Movies", when {
+            store.tmdbKey.isEmpty() -> "Add your free TMDB key in Settings → Movies to see the latest movies with posters, " +
+                "trailers and where to watch them. Below: free movie channels, free movie apps and classics."
+            tmdbFailed != null -> tmdbFailed!!
+            tmdbLists.isEmpty() -> "Loading the latest movies…"
+            else -> "The latest movies and where to watch them free or on your apps · free movie channels · free classics"
+        }.ifEmpty { when {
             movieChannels.isNotEmpty() -> "Free 24/7 movie channels that play right here, free movie apps, and free classics"
             movieChannelsLoading -> "Loading movie channels…"
             movieChannelsFailed -> "Couldn't load movie channels right now. Check your internet connection, then open Movies again."
             else -> "Free 24/7 movie channels, free movie apps, and free classics"
-        }))
+        } }))
+        renderTmdb()
         // Only rebuild rows that changed, so TV focus stays put while the classics load
         if (top != lastMoviesTop) { lastMoviesTop = top; moviesTop.submit(top) }
         val mc = movieChannelItems()
@@ -796,7 +1115,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         findViewById<View>(R.id.searchView).visibility = if (s == Section.SEARCH) View.VISIBLE else View.GONE
         root.visibility = if (s == Section.LIVE) View.VISIBLE else View.GONE
         guideView.visibility = if (s == Section.GUIDE) View.VISIBLE else View.GONE
-        moviesList.visibility = if (s == Section.MOVIES) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.moviesView).visibility = if (s == Section.MOVIES) View.VISIBLE else View.GONE
         settingsView.visibility = if (s == Section.SETTINGS) View.VISIBLE else View.GONE
         // The guide is part of Live TV now, so Live TV stays highlighted for both views
         navItems.forEachIndexed { i, v -> v.isSelected = i == s.ordinal || (s == Section.GUIDE && i == Section.LIVE.ordinal) }
@@ -818,7 +1137,7 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
             }
             Section.SEARCH -> searchBox.requestFocus()
             Section.LIVE -> list.requestFocus()
-            Section.MOVIES -> { loadMovies(); moviesList.post { moviesList.getChildAt(1)?.requestFocus() } }
+            Section.MOVIES -> { loadMovies(); moviesList.post { (moviesList.getChildAt(1) ?: moviesList.getChildAt(0))?.requestFocus() } }
             Section.GUIDE -> {
                 refreshGuideScreen()
                 if (current == null) showPreviewMsg("Move through the guide to preview a channel")
@@ -1209,6 +1528,12 @@ class MainActivity : AppCompatActivity(), TvHost, GuideHost, MovieHost {
         row("Remove one of your playlists", "${store.customSources().size} added") { showRemoveDialog() }
         row("Show / hide categories", "${store.hiddenGroups.size} hidden") { showHideCategories() }
         row("Retry offline channels", "Clear the red offline marks and test again") { retryOffline() }
+
+        header("Movies")
+        row("Movie database (TMDB) key", if (store.tmdbKey.isEmpty()) "Not set — add your free key to see the latest movies"
+            else "Added ✓ — tap to change") { sv ->
+            showTmdbKeyDialog { sv.text = if (store.tmdbKey.isEmpty()) "Not set — add your free key to see the latest movies" else "Added ✓ — tap to change" }
+        }
 
         header("Playback")
         row("Buffering & quality", playbackModeLabel()) { sv ->

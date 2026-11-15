@@ -279,6 +279,24 @@ class Store(context: Context) {
         return due
     }
 
+    /** Your own TMDB API key. Kept only on this device (never in the app's code or backups). */
+    var tmdbKey: String
+        get() = p.getString("tmdbKey", "") ?: ""
+        set(v) = p.edit().putString("tmdbKey", v.trim()).apply()
+
+    private val tmdbList: JSONArray = try { JSONArray(p.getString("tmdbList", "[]")) } catch (e: Exception) { JSONArray() }
+
+    fun tmdbMyList(): List<TMovie> = (0 until tmdbList.length()).map { TMovie.fromJson(tmdbList.getJSONObject(it)) }.reversed()
+
+    fun isTmdbMine(id: Int) = (0 until tmdbList.length()).any { tmdbList.getJSONObject(it).optInt("id") == id }
+
+    fun toggleTmdbMine(m: TMovie): Boolean {
+        val i = (0 until tmdbList.length()).firstOrNull { tmdbList.getJSONObject(it).optInt("id") == m.id }
+        if (i != null) tmdbList.remove(i) else tmdbList.put(m.toJson())
+        p.edit().putString("tmdbList", tmdbList.toString()).apply()
+        return i == null
+    }
+
     var welcomed: Boolean
         get() = p.getBoolean("welcomed", false)
         set(v) = p.edit().putBoolean("welcomed", v).apply()
