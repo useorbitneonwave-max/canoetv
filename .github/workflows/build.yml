@@ -23,6 +23,11 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Check TMDB key
+        env:
+          TMDB_KEY: ${{ secrets.TMDB_KEY }}
+        run: if [ ${#TMDB_KEY} -ge 20 ]; then echo "TMDB key found (${#TMDB_KEY} characters)"; else echo "::warning::TMDB_KEY secret is missing"; fi
+
       - name: Build APK
         env:
           TMDB_KEY: ${{ secrets.TMDB_KEY }}
